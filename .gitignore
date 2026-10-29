@@ -1,0 +1,31 @@
+# .gitignore
+
+# Builds
+build/
+cmake-build-*/
+.vs/
+.vscode/
+.idea/
+CLion/
+
+# JUCE: fetched by CMake, or vendored locally; never committed
+external/JUCE/
+JUCE/
+
+# macOS
+.DS_Store
+*.dSYM
+*.xcuserdatad/
+DerivedData/
+
+# Compiled artefacts that occasionally leak into the tree
+*.o
+*.a
+*.dylib
+*.vst3/
+*.component/
+*.app/
+
+# Nothing in the repo should need these
+*.log
+validation/

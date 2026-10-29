@@ -1,0 +1,70 @@
+name: build
+
+# Optional convenience: this repo is built and used locally on macOS, so CI is
+# here for reproducing a clean build, not for release gating. GitHub Actions
+# minutes are a limited resource on this account — feel free to disable the
+# workflow, or run it manually (workflow_dispatch) instead of on every push.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore: ['**/*.md', 'demo/**']
+
+jobs:
+  core:
+    name: core tests (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DOPXY_BUILD_PLUGIN=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build
+        run: cmake --build build -j4
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Render demo
+        run: ./build/opxy_demo demo/ci_demo.wav
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-demo-wav
+          path: demo/ci_demo.wav
+
+  macos:
+    name: macOS plugin (VST3 + AU)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-7.0.12-${{ runner.os }}
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOPXY_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j4 --config Release
+
+      - name: Test the engine
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Validate AU
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R build/SeqQueen_artefacts/Release/AU/Seq\ Queen.component ~/Library/Audio/Plug-Ins/Components/ || true
+          auval -v aumu Sqxy Sqqn || echo "auval failed (check PLUGIN_CODE / PLUGIN_MANUFACTURER_CODE)"
+
+      - name: Package
+        run: |
+          cd build/SeqQueen_artefacts/Release
+          ditto -c -k --sequesterRsrc --keepParent "VST3/Seq Queen.vst3" "SeqQueen-VST3-mac.zip" || true
+          ditto -c -k --sequesterRsrc --keepParent "AU/Seq Queen.component" "SeqQueen-AU-mac.zip" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SeqQueen-macOS
+          path: |
+            build/SeqQueen_artefacts/Release/SeqQueen-*.zip

@@ -1,0 +1,75 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "core",
+      "displayName": "Core only (no JUCE): tests + demo renderer",
+      "binaryDir": "${sourceDir}/build/core",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "OPXY_BUILD_PLUGIN": "OFF",
+        "OPXY_BUILD_TESTS": "ON",
+        "OPXY_BUILD_DEMO": "ON"
+      }
+    },
+    {
+      "name": "mac-debug",
+      "displayName": "macOS debug (VST3 + AU + Standalone)",
+      "binaryDir": "${sourceDir}/build/mac-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "OPXY_FETCH_JUCE": "ON"
+      }
+    },
+    {
+      "name": "mac-release",
+      "displayName": "macOS release (VST3 + AU + Standalone)",
+      "binaryDir": "${sourceDir}/build/mac-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "OPXY_FETCH_JUCE": "ON"
+      }
+    },
+    {
+      "name": "mac-release-universal",
+      "inherits": "mac-release",
+      "displayName": "macOS universal release (arm64 + x86_64)",
+      "binaryDir": "${sourceDir}/build/mac-release-universal",
+      "cacheVariables": {
+        "OPXY_UNIVERSAL_BUILD": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "core",
+      "configurePreset": "core"
+    },
+    {
+      "name": "mac-debug",
+      "configurePreset": "mac-debug"
+    },
+    {
+      "name": "mac-release",
+      "configurePreset": "mac-release"
+    },
+    {
+      "name": "mac-release-universal",
+      "configurePreset": "mac-release-universal"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "core",
+      "configurePreset": "core",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
