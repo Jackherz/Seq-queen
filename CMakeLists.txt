@@ -136,6 +136,7 @@ if (OPXY_BUILD_PLUGIN)
         Source/Plugin/PluginProcessor.cpp
         Source/Plugin/PluginEditor.cpp
         Source/Plugin/ParamIDs.cpp
+        Source/Plugin/SeqQueenLookAndFeel.cpp
         Source/Plugin/Components/StepGrid.cpp
         Source/Plugin/Components/PunchPads.cpp
         Source/Plugin/Components/PLockPanel.cpp

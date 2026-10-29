@@ -61,6 +61,9 @@ public:
     bool isPunchHeld (int fxIndex) const;
     bool isPunchEngaged (int fxIndex) const;
 
+    /** Focused track index (0-based), read from the parameter for UI labels. */
+    int getFocusTrack() const;
+
     /** True while the punch FX note range is being used, for UI hinting. */
     int getFxNoteBase() const { return fxNoteBase.load(); }
 

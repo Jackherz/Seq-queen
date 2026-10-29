@@ -34,8 +34,20 @@ transport, and the punch-in FX are performed live (pads, MIDI notes, or automati
 | Synth engines per track: sine / triangle / saw / square / noise + noise layer | done |
 | Play-along from MIDI, punch FX from MIDI notes, MIDI out from the sequencer | done |
 | Host save/load (parameters + step grid) | done |
-| Editor: step grid, punch pads, p-lock editor, per-track mixer | written, not yet compiled |
+| Editor: step grid, punch pads, p-lock editor, per-track mixer | written; syntax-checked against JUCE headers, not yet built |
 | Song mode / pattern chaining, piano roll, per-step sample playback | not started |
+
+## The look
+
+The whole UI is hand-drawn `paint()` code — no images, no resources. The design
+spec lives beside it in `docs/ui/`:
+
+![Seq Queen editor](docs/ui/mockup-main.png)
+
+`docs/ui/render_mockup.py` renders that PNG (and the FX-lanes view); the C++ in
+`Source/Plugin/` is written against the same palette and geometry. Tokens are in
+`Source/Plugin/Theme.h`, component styling in `SeqQueenLookAndFeel.*`. See
+`docs/ui/README.md` for the layout map.
 
 ## Hear it before you build it
 

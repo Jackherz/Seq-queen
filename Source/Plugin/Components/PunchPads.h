@@ -27,6 +27,9 @@ private:
     SeqQueenAudioProcessor& proc;
     int index = 0;
     juce::String title;
+
+    bool lastEngaged = false;
+    float lastAmount = -1.0f;
 };
 
 class PunchBarComponent : public juce::Component
@@ -37,6 +40,7 @@ public:
     void paint (juce::Graphics& g) override;
 
 private:
+    SeqQueenAudioProcessor& proc;
     std::vector<std::unique_ptr<PunchPadComponent>> pads;
 };
 

@@ -53,6 +53,7 @@ private:
     juce::Rectangle<float> padBounds (int track, int step) const;
     int trackAt (juce::Point<int> position) const;
     int stepAt (juce::Point<int> position) const;
+    int stepWidthAt (int row) const;
     void applyToStep (int track, int step, bool active);
 
     SeqQueenAudioProcessor& proc;

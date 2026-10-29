@@ -9,9 +9,13 @@ built in two halves:
 
 * **`Source/Core/` — JUCE-free engine. Written *and verified*.** 28 unit tests,
   ~82k assertions, all green, and it renders the audio in `demo/opxy_demo.wav`.
-* **`Source/Plugin/` — JUCE wrapper. Written, never compiled.** Expect ordinary
-  compile errors: a wrong include, a missing `juce::`, an attachment signature, etc.
-  Nothing structural should be wrong, but treat it as "first draft that must be built".
+* **`Source/Plugin/` — JUCE wrapper. Written, never linked.** Every translation
+  unit now compiles clean with `g++ -fsyntax-only` against the real JUCE 7.0.12
+  headers (see "Syntax check" below), so typos, wrong signatures and missing
+  members are already gone. What is *not* verified is anything that needs a full
+  build: the module implementations, the plugin wrappers, resource/`JuceHeader`
+  generation, and the AU/VST3 bundles. Expect link-level surprises, not
+  "`ui::` has not been declared".
 
 Your job, in order:
 
@@ -41,6 +45,19 @@ cmake --build --preset core
 ctest --preset core                      # 28 tests
 ./build/core/opxy_demo demo/opxy_demo.wav
 ```
+
+### Syntax check (no full build needed)
+
+If you only want to know whether the plugin *sources* still make sense — fast,
+and it works without freetype/X11/ALSA:
+
+```bash
+tools/check_plugin_syntax.sh /path/to/JUCE
+```
+
+It writes a throwaway `JuceHeader.h`, then `g++ -fsyntax-only`s every file in
+`Source/Plugin/`. All eight pass as of this handoff. It is a first pass, not a
+substitute for building.
 
 Useful switches: `-DOPXY_JUCE_PATH=/path/to/JUCE` (skip the download),
 `-DOPXY_BUILD_PLUGIN=OFF`, `-DOPXY_UNIVERSAL_BUILD=ON` (arm64 + x86_64).

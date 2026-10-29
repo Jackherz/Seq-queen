@@ -362,6 +362,14 @@ void SeqQueenAudioProcessor::setPunchHeld (int fxIndex, bool held)
         engine.setPunchVelocity (fxIndex, 1.0f);
 }
 
+int SeqQueenAudioProcessor::getFocusTrack() const
+{
+    if (pFocusTrack != nullptr)
+        return juce::jlimit (0, opxy::kMaxTracks - 1,
+                             static_cast<int> (std::lround (pFocusTrack->load())));
+    return 0;
+}
+
 bool SeqQueenAudioProcessor::isPunchHeld (int fxIndex) const
 {
     if (fxIndex < 0 || fxIndex >= opxy::kMaxFx)
