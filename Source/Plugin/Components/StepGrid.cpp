@@ -1,6 +1,8 @@
 #include "StepGrid.h"
 #include "../Theme.h"
 
+#include <cmath>
+
 namespace opxy
 {
 
@@ -14,6 +16,15 @@ StepGridComponent::StepGridComponent (SeqQueenAudioProcessor& processor)
 void StepGridComponent::setVisibleSteps (int steps)
 {
     visibleSteps = juce::jlimit (1, kMaxSteps, steps);
+    repaint();
+}
+
+void StepGridComponent::setMode (Mode newMode)
+{
+    if (mode == newMode)
+        return;
+    mode = newMode;
+    dragging = false;
     repaint();
 }
 
@@ -31,12 +42,13 @@ void StepGridComponent::timerCallback()
     repaint();
 }
 
-juce::Rectangle<int> StepGridComponent::rowBounds (int track) const
+juce::Rectangle<int> StepGridComponent::rowBounds (int row) const
 {
     const int top = headerHeight;
     const int available = juce::jmax (1, getHeight() - headerHeight);
-    const int rowHeight = available / kMaxTracks;
-    return { 0, top + track * rowHeight, getWidth(), rowHeight };
+    const int count = juce::jmax (1, rowCount());
+    const int height = available / count;
+    return { 0, top + row * height, getWidth(), height };
 }
 
 juce::Rectangle<float> StepGridComponent::padBounds (int track, int step) const
@@ -54,9 +66,10 @@ int StepGridComponent::trackAt (juce::Point<int> position) const
     if (position.y < headerHeight)
         return -1;
     const int available = juce::jmax (1, getHeight() - headerHeight);
-    const int rowHeight = juce::jmax (1, available / kMaxTracks);
-    const int track = (position.y - headerHeight) / rowHeight;
-    return juce::isPositiveAndBelow (track, kMaxTracks) ? track : -1;
+    const int count = juce::jmax (1, rowCount());
+    const int rowHeight = juce::jmax (1, available / count);
+    const int row = (position.y - headerHeight) / rowHeight;
+    return juce::isPositiveAndBelow (row, count) ? row : -1;
 }
 
 int StepGridComponent::stepAt (juce::Point<int> position) const
@@ -88,6 +101,25 @@ void StepGridComponent::mouseDown (const juce::MouseEvent& e)
 
     if (track < 0 || step < 0)
         return;
+
+    if (mode == Mode::FxLanes)
+    {
+        if (e.mods.isPopupMenu())
+        {
+            clearLane (track);
+            return;
+        }
+
+        // First edit switches the lane on, so drawing a punch just works.
+        auto& pattern = proc.getPattern();
+        if (! pattern.isFxLaneEnabled (track))
+            pattern.setFxLaneEnabled (track, true);
+
+        dragging = true;
+        dragActiveState = pattern.getFxLaneStep (track, step) <= 0.0f;
+        toggleLaneStep (track, step);
+        return;
+    }
 
     selectedTrack = track;
     selectedStep = step;
@@ -124,7 +156,27 @@ void StepGridComponent::mouseDrag (const juce::MouseEvent& e)
     if (track < 0 || step < 0)
         return;
 
+    if (mode == Mode::FxLanes)
+    {
+        proc.getPattern().setFxLaneStep (track, step, dragActiveState ? 1.0f : 0.0f);
+        repaint();
+        return;
+    }
+
     applyToStep (track, step, dragActiveState);
+}
+
+void StepGridComponent::toggleLaneStep (int fx, int step)
+{
+    proc.getPattern().setFxLaneStep (fx, step, dragActiveState ? 1.0f : 0.0f);
+    repaint();
+}
+
+void StepGridComponent::clearLane (int fx)
+{
+    proc.getPattern().clearFxLane (fx);
+    proc.getPattern().setFxLaneEnabled (fx, false);
+    repaint();
 }
 
 void StepGridComponent::mouseUp (const juce::MouseEvent&)
@@ -136,6 +188,98 @@ void StepGridComponent::paint (juce::Graphics& g)
 {
     g.fillAll (theme::panel);
 
+    if (mode == Mode::FxLanes)
+    {
+        paintFxLanes (g);
+        return;
+    }
+
+    paintTracks (g);
+}
+
+void StepGridComponent::paintFxLanes (juce::Graphics& g)
+{
+    auto& pattern = proc.getPattern();
+    const int laneLength = pattern.getLaneLength();
+
+    // Which lane step the playhead is on (the lanes share the pattern clock).
+    int currentLaneStep = -1;
+    if (proc.getSequencer().isRunning())
+    {
+        const auto stepPos = static_cast<int> (std::floor (proc.getSequencer().getStepPosition()));
+        currentLaneStep = ((stepPos % laneLength) + laneLength) % laneLength;
+    }
+
+    // Step numbers.
+    g.setFont (theme::monoFont (10.0f));
+    for (int step = 0; step < visibleSteps; ++step)
+    {
+        if (step % kStepsPerBeat != 0)
+            continue;
+        const auto bounds = padBounds (0, step);
+        g.setColour (step % 16 == 0 ? theme::textDim : theme::gridLine.brighter (0.4f));
+        g.drawText (juce::String (step + 1),
+                    juce::Rectangle<int> (static_cast<int> (bounds.getX()), 0,
+                                          static_cast<int> (bounds.getWidth() * kStepsPerBeat), headerHeight),
+                    juce::Justification::centredLeft, false);
+    }
+
+    for (int f = 0; f < kMaxFx; ++f)
+    {
+        const auto row = rowBounds (f);
+        const bool enabled = pattern.isFxLaneEnabled (f);
+        const bool engaged = proc.getEngine().isFxEngaged (f);
+
+        if (f % 2 == 0)
+        {
+            g.setColour (theme::background.withAlpha (0.45f));
+            g.fillRect (row);
+        }
+
+        g.setColour (enabled ? theme::text : theme::textDim);
+        g.setFont (theme::labelFont (10.0f));
+        g.drawText (juce::String (fxTypeName (static_cast<FxType> (f))).toUpperCase(),
+                    row.withTrimmedLeft (10).withWidth (labelWidth - 14),
+                    juce::Justification::centredLeft, true);
+
+        g.setColour (enabled ? theme::accentAlt : theme::textDim.withAlpha (0.6f));
+        g.setFont (theme::monoFont (9.0f));
+        g.drawText (enabled ? "SEQ" : "off",
+                    juce::Rectangle<int> (labelWidth - 40, row.getY(), 36, row.getHeight()),
+                    juce::Justification::centredRight, false);
+
+        for (int step = 0; step < visibleSteps; ++step)
+        {
+            const auto pad = padBounds (f, step);
+            const float value = pattern.getFxLaneStep (f, step);
+            const bool beyond = step >= laneLength;
+            const bool isCurrent = step == currentLaneStep;
+
+            juce::Colour fill = value > 0.0f ? theme::accent.withAlpha (0.35f + 0.65f * value)
+                                             : theme::stepOff;
+            if (beyond)
+                fill = fill.withAlpha (0.22f);
+
+            g.setColour (fill);
+            g.fillRoundedRectangle (pad, 3.0f);
+
+            if (step % kStepsPerBeat == 0)
+            {
+                g.setColour (theme::gridLine.brighter (0.35f));
+                g.drawRoundedRectangle (pad.reduced (0.5f), 3.0f, 1.0f);
+            }
+
+            if (isCurrent)
+            {
+                g.setColour (theme::stepOn.withAlpha (engaged ? 0.9f : 0.45f));
+                g.drawRoundedRectangle (pad.reduced (1.0f), 3.0f, 1.4f);
+            }
+        }
+    }
+}
+
+void StepGridComponent::paintTracks (juce::Graphics& g)
+{
     auto& pattern = proc.getPattern();
 
     // Step numbers, one label per beat.

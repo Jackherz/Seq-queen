@@ -591,7 +591,7 @@ TEST (stepsSurviveSerialisationRoundTrip)
     original.tracks[7].steps[63].note.store (96.0f);
 
     const std::string blob = opxy::serialiseSteps (original);
-    CHECK (blob.rfind ("opxy-steps v1", 0) == 0);
+    CHECK (blob.rfind ("opxy-steps v2", 0) == 0);
 
     opxy::Pattern restored;
     CHECK (opxy::deserialiseSteps (blob, restored));
@@ -612,6 +612,34 @@ TEST (stepsSurviveSerialisationRoundTrip)
     CHECK (! restored.tracks[0].steps[0].active.load());
     CHECK (! restored.tracks[2].steps[6].active.load());
 
+    // ----- punch-FX lanes -------------------------------------------------
+    original.setFxLaneEnabled (static_cast<int> (opxy::FxType::Stutter), true);
+    original.setFxLaneStep (static_cast<int> (opxy::FxType::Stutter), 0, 1.0f);
+    original.setFxLaneStep (static_cast<int> (opxy::FxType::Stutter), 2, 0.4f);
+    original.fxLaneSteps.store (16);
+
+    const std::string laneBlob = opxy::serialiseSteps (original);
+    opxy::Pattern laneRestored;
+    CHECK (opxy::deserialiseSteps (laneBlob, laneRestored));
+
+    const int stutter = static_cast<int> (opxy::FxType::Stutter);
+    CHECK (laneRestored.isFxLaneEnabled (stutter));
+    CHECK_NEAR (laneRestored.getFxLaneStep (stutter, 0), 1.0f, 0.001f);
+    CHECK_NEAR (laneRestored.getFxLaneStep (stutter, 2), 0.4f, 0.001f);
+    CHECK_NEAR (laneRestored.getFxLaneStep (stutter, 1), 0.0f, 0.001f);
+    CHECK (laneRestored.getLaneLength() == 16);
+
+    // A v1 blob (steps only) still loads and leaves the lanes empty.
+    const std::string v1Blob =
+        "opxy-steps v1\n"
+        "t1 s2 a=1 n=48 v=0.5 g=0.5 r=1 d=0\n"
+        "x3 s0 v=1\n";   // should be ignored: v1 has no lanes
+    opxy::Pattern fromV1;
+    CHECK (opxy::deserialiseSteps (v1Blob, fromV1));
+    CHECK (fromV1.tracks[1].steps[2].active.load());
+    CHECK (! fromV1.isFxLaneEnabled (3));
+    CHECK_NEAR (fromV1.getFxLaneStep (3, 0), 0.0f, 0.001f);
+
     // Round-tripping twice is stable.
     const std::string blob2 = opxy::serialiseSteps (restored);
     CHECK (blob == blob2);
@@ -620,6 +648,218 @@ TEST (stepsSurviveSerialisationRoundTrip)
     opxy::Pattern junk;
     CHECK (! opxy::deserialiseSteps ("nonsense", junk));
     CHECK (! opxy::deserialiseSteps ("", junk));
+}
+
+TEST (fxLaneDrivesEngagementOnTheGrid)
+{
+    opxy::Engine engine;
+    engine.prepare (kSampleRate, 256);
+    engine.getPattern().tracks[0].length.store (16);
+    for (int t = 1; t < opxy::kMaxTracks; ++t)
+        engine.getPattern().tracks[t].length.store (1);
+
+    const int stutter = static_cast<int> (opxy::FxType::Stutter);
+
+    // Lane off: never engaged, whatever the steps say.
+    engine.getPattern().setFxLaneStep (stutter, 0, 1.0f);
+    engine.getPattern().setFxLaneStep (stutter, 2, 1.0f);
+
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    float* channels[2] = { l.data(), r.data() };
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    for (int i = 0; i < 20; ++i)
+    {
+        engine.process (channels, 2, 256, transport);
+        CHECK (! engine.isFxEngaged (stutter));
+        CHECK_NEAR (engine.getEffectiveAmount (stutter), 0.0f, 0.001f);
+    }
+
+    // Lane on: engaged on steps 0 and 2, released on step 1.
+    engine.getPattern().setFxLaneEnabled (stutter, true);
+    engine.reset();
+
+    // 120 bpm -> one 16th = 6000 samples. Step 0 spans 0..5999.
+    engine.process (channels, 2, 256, transport);
+    CHECK (engine.isFxEngaged (stutter));
+    CHECK (engine.getEffectiveAmount (stutter) > 0.5f);
+
+    // Advance to step 1 (6000..11999): lane value 0 -> release.
+    bool sawRelease = false;
+    for (int i = 0; i < 40; ++i)
+    {
+        engine.process (channels, 2, 256, transport);
+        if (! engine.isFxEngaged (stutter))
+            sawRelease = true;
+    }
+    CHECK (sawRelease);
+
+    // Step 2 (12000..17999): engaged again.
+    bool sawPunchAgain = false;
+    for (int i = 0; i < 60; ++i)
+    {
+        engine.process (channels, 2, 256, transport);
+        if (engine.isFxEngaged (stutter))
+            sawPunchAgain = true;
+    }
+    CHECK (sawPunchAgain);
+}
+
+TEST (fxLaneIsSilentWhenTransportStops)
+{
+    opxy::Engine engine;
+    engine.prepare (kSampleRate, 256);
+
+    const int crush = static_cast<int> (opxy::FxType::Bitcrush);
+    engine.getPattern().setFxLaneStep (crush, 0, 1.0f);
+    engine.getPattern().setFxLaneEnabled (crush, true);
+
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    float* channels[2] = { l.data(), r.data() };
+
+    opxy::TransportInfo stopped;
+    stopped.playing = false;
+
+    for (int i = 0; i < 10; ++i)
+    {
+        engine.process (channels, 2, 256, stopped);
+        CHECK (! engine.isFxEngaged (crush));
+    }
+}
+
+TEST (fxLaneAmountSetsWetLevel)
+{
+    opxy::Engine engine;
+    engine.prepare (kSampleRate, 256);
+
+    const int filter = static_cast<int> (opxy::FxType::FilterSweep);
+    engine.getPattern().setFxLaneEnabled (filter, true);
+    engine.getPattern().setFxLaneStep (filter, 0, 0.25f);
+
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    float* channels[2] = { l.data(), r.data() };
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    engine.process (channels, 2, 256, transport);
+    // The lane value becomes the wet amount for that step.
+    CHECK_NEAR (engine.getEffectiveAmount (filter), 0.25f, 0.01f);
+}
+
+TEST (punchVelocityScalesTheWetAmount)
+{
+    opxy::Engine engine;
+    engine.prepare (kSampleRate, 256);
+
+    const int crush = static_cast<int> (opxy::FxType::Bitcrush);
+    auto& settings = engine.getFxSettings (crush);
+    settings.amount.store (1.0f);
+    settings.velocitySensitivity.store (1.0f);   // fully velocity sensitive
+    settings.engaged.store (true);
+
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    float* channels[2] = { l.data(), r.data() };
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    // Hard hit = full amount.
+    engine.setPunchVelocity (crush, 1.0f);
+    engine.process (channels, 2, 256, transport);
+    CHECK_NEAR (engine.getEffectiveAmount (crush), 1.0f, 0.01f);
+
+    // Soft hit = proportionally less.
+    engine.setPunchVelocity (crush, 0.3f);
+    engine.process (channels, 2, 256, transport);
+    CHECK_NEAR (engine.getEffectiveAmount (crush), 0.3f, 0.01f);
+
+    // Sensitivity 0 ignores velocity again.
+    settings.velocitySensitivity.store (0.0f);
+    engine.setPunchVelocity (crush, 0.1f);
+    engine.process (channels, 2, 256, transport);
+    CHECK_NEAR (engine.getEffectiveAmount (crush), 1.0f, 0.01f);
+
+    // Released = 0, regardless of velocity.
+    settings.engaged.store (false);
+    engine.process (channels, 2, 256, transport);
+    CHECK_NEAR (engine.getEffectiveAmount (crush), 0.0f, 0.001f);
+}
+
+TEST (softHitIsAudiblyGentlerThanHardHit)
+{
+    // End-to-end on real audio: a soft punch must move the signal less than a
+    // hard one. Measured as deviation from the un-punched signal, which is
+    // robust for any effect type (energy is a bad proxy: a low-pass barely
+    // changes the energy of a bass note).
+    const auto renderAndCompare = [] (bool engage, float velocity)
+    {
+        opxy::Engine engine;
+        engine.prepare (kSampleRate, 256);
+        engine.getPattern().tracks[0].length.store (16);
+        for (auto& step : engine.getPattern().tracks[0].steps)
+            step.active.store (true);
+        for (int t = 1; t < opxy::kMaxTracks; ++t)
+            engine.getPattern().tracks[t].length.store (1);
+
+        const int crush = static_cast<int> (opxy::FxType::Bitcrush);
+        auto& settings = engine.getFxSettings (crush);
+        settings.amount.store (1.0f);
+        settings.paramA.store (0.9f);
+        settings.paramB.store (0.8f);
+        settings.velocitySensitivity.store (1.0f);
+        settings.engaged.store (engage);
+        engine.setPunchVelocity (crush, velocity);
+
+        std::vector<float> l (256, 0.0f), r (256, 0.0f);
+        float* channels[2] = { l.data(), r.data() };
+
+        opxy::TransportInfo transport;
+        transport.playing = true;
+        transport.bpm = 120.0;
+
+        std::vector<float> captured;
+        captured.reserve (256 * 180);
+
+        for (int block = 0; block < 180; ++block)
+        {
+            std::fill (l.begin(), l.end(), 0.0f);
+            std::fill (r.begin(), r.end(), 0.0f);
+            engine.process (channels, 2, 256, transport);
+            if (block > 20)
+                captured.insert (captured.end(), l.begin(), l.end());
+        }
+        return captured;
+    };
+
+    const auto dry = renderAndCompare (false, 1.0f);
+    const auto hard = renderAndCompare (true, 1.0f);
+    const auto soft = renderAndCompare (true, 0.15f);
+
+    CHECK (dry.size() == hard.size());
+    CHECK (dry.size() == soft.size());
+
+    const auto deviation = [] (const std::vector<float>& a, const std::vector<float>& b)
+    {
+        double sum = 0.0;
+        for (std::size_t i = 0; i < a.size(); ++i)
+        {
+            const double difference = static_cast<double> (a[i]) - static_cast<double> (b[i]);
+            sum += difference * difference;
+        }
+        return sum / std::max<std::size_t> (1, a.size());
+    };
+
+    const double hardDeviation = deviation (hard, dry);
+    const double softDeviation = deviation (soft, dry);
+
+    CHECK (hardDeviation > 1.0e-8);            // the punch is doing something
+    CHECK (softDeviation < hardDeviation * 0.5); // and a soft hit does much less
 }
 
 // --------------------------------- FX tests --------------------------------

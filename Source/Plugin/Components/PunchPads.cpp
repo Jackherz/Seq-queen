@@ -46,11 +46,30 @@ void PunchPadComponent::paint (juce::Graphics& g)
     g.setColour (engaged ? theme::background.withAlpha (0.85f) : theme::text);
     g.setFont (theme::labelFont (12.0f));
     g.drawFittedText (juce::String (title).toUpperCase(),
-                      getLocalBounds().reduced (6, 4).withTrimmedBottom (12),
+                      getLocalBounds().reduced (6, 4).withTrimmedBottom (22),
                       juce::Justification::centred, 2);
 
-    // Which bus is being punched: master or the focused track.
+    // The MIDI note that punches this FX, so the mapping is discoverable without
+    // a manual. Shown as a note name plus its number (C1 = 36, and some DAWs
+    // number octaves differently, so the number disambiguates).
     const auto& settings = proc.getEngine().getFxSettings (index);
+    const int note = proc.getFxNoteBase() + index;
+    const bool fxNotesOn = [this]
+    {
+        if (auto* value = proc.getAPVTS().getRawParameterValue ("fx_notes"))
+            return value->load() > 0.5f;
+        return true;
+    }();
+
+    g.setColour (engaged ? theme::background.withAlpha (0.75f)
+                         : (fxNotesOn ? theme::textDim : theme::textDim.withAlpha (0.45f)));
+    g.setFont (theme::monoFont (9.0f));
+    g.drawText (juce::MidiMessage::getMidiNoteName (note, true, true, 3)
+                  + " (" + juce::String (note) + ")",
+                getLocalBounds().reduced (6, 3).withTrimmedBottom (10),
+                juce::Justification::bottomLeft, false);
+
+    // Which bus is being punched: master or the focused track.
     const int target = settings.target.load();
     juce::String targetText = "MSTR";
 
@@ -65,8 +84,9 @@ void PunchPadComponent::paint (juce::Graphics& g)
     g.setFont (theme::monoFont (9.0f));
     g.drawText (targetText, getLocalBounds().reduced (6, 3), juce::Justification::bottomRight, false);
 
-    // Amount meter along the bottom edge.
-    const float amount = settings.amount.load();
+    // Amount meter along the bottom edge: shows the *effective* wet amount, so a
+    // soft MIDI hit visibly meters lower than a hard one.
+    const float amount = proc.getEngine().getEffectiveAmount (index);
     if (amount > 0.001f)
     {
         g.setColour (engaged ? theme::background.withAlpha (0.5f) : theme::accent.withAlpha (0.65f));

@@ -66,6 +66,32 @@ public:
     const StepEvent* getLastEvents() const noexcept { return lastEvents; }
 
     float getOutputPeak() const noexcept { return outputPeak.load (std::memory_order_relaxed); }
+
+    /** Wet amount the FX is actually using this block: base amount scaled by
+        trigger velocity, or the sequenced lane value when the lane is driving it.
+        0 when the FX is not engaged. UI can show this to explain why a soft
+        MIDI hit feels weaker than a hard one. */
+    float getEffectiveAmount (int fxIndex) const noexcept
+    {
+        return effectiveAmount[clamp (fxIndex, 0, kMaxFx - 1)].load (std::memory_order_relaxed);
+    }
+
+    /** True when the FX is actually punching right now, from any source:
+        pad / MIDI / automation hold, or a sequenced punch lane. Use this for UI
+        feedback; FxSettings::engaged is only the manual trigger input. */
+    bool isFxEngaged (int fxIndex) const noexcept
+    {
+        return fxEngaged[clamp (fxIndex, 0, kMaxFx - 1)].load (std::memory_order_relaxed);
+    }
+
+    /** Records the velocity of whatever just punched an FX (MIDI note or pad). */
+    void setPunchVelocity (int fxIndex, float velocity) noexcept
+    {
+        if (fxIndex < 0 || fxIndex >= kMaxFx)
+            return;
+        fxSettings[fxIndex].velocity.store (clamp (velocity, 0.0f, 1.0f),
+                                            std::memory_order_relaxed);
+    }
     double getSampleRate() const noexcept { return sampleRate; }
     int getMaxBlockSize() const noexcept { return maxBlockSize; }
 
@@ -94,6 +120,8 @@ private:
     std::atomic<float> masterGainDb { -3.0f };
     std::atomic<int>   focusTrack { 0 };
     std::atomic<float> outputPeak { 0.0f };
+    std::atomic<float> effectiveAmount[kMaxFx];
+    std::atomic<bool>  fxEngaged[kMaxFx];
     std::atomic<bool>  midiOutEnabled { true };
 
     double sampleRate = 44100.0;

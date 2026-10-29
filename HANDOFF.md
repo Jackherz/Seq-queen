@@ -7,7 +7,7 @@ The previous agent (that's me) could not compile the JUCE layer: the sandbox had
 JUCE, no X11/ALSA/freetype headers, and no macOS toolchain. So the architecture was
 built in two halves:
 
-* **`Source/Core/` — JUCE-free engine. Written *and verified*.** 23 unit tests,
+* **`Source/Core/` — JUCE-free engine. Written *and verified*.** 28 unit tests,
   ~82k assertions, all green, and it renders the audio in `demo/opxy_demo.wav`.
 * **`Source/Plugin/` — JUCE wrapper. Written, never compiled.** Expect ordinary
   compile errors: a wrong include, a missing `juce::`, an attachment signature, etc.
@@ -38,7 +38,7 @@ Engine only — no JUCE needed, so this must always work, on any machine:
 ```bash
 cmake --preset core
 cmake --build --preset core
-ctest --preset core                      # 23 tests
+ctest --preset core                      # 28 tests
 ./build/core/opxy_demo demo/opxy_demo.wav
 ```
 
@@ -125,6 +125,26 @@ docs/ADDING_AN_FX.md             recipe for adding a seventh punch-in effect
 6. **The instrument makes its own sound.** The original brief proposed an audio
    effect; the user chose "instrument with internal voices", so `IS_SYNTH TRUE` and
    there is no input bus.
+7. **The sequencer and the punch FX stay in one plugin.** It was worth considering a
+   split (sequencer plugin + FX plugin) — the answer is no, because the user's favourite
+   OP-XY feature is *sequencing the punches*, and that needs both halves in one process:
+   the punch lane resolves against the same 16th grid that fires the notes, and an FX
+   must be able to target one internal track. Across two plugins that becomes MIDI
+   routing into an effect, which AU in Live doesn't even support. The FX engine is
+   sequencer-independent though (`FxChain` + `FxSettings`), so a standalone FX-only
+   build can be added later as an extra target — see `docs/ARCHITECTURE.md`
+   ("Splitting into two plugins"), budget a day.
+
+### Punch triggering: velocity and lanes
+
+* Pads and MIDI notes both punch; **MIDI velocity scales the wet amount** through the
+  per-FX `Velocity Amount` parameter (default 0.7, 0 = ignore). Pads are full strength.
+* Each FX also has a **sequenced punch lane** (`Pattern::fxLane`, 16 steps by default,
+  up to 64). Lane value = wet amount for that 16th, 0 = off; consecutive non-zero steps
+  hold the punch. It overrides the amount knob and ignores velocity.
+* `Engine::isFxEngaged(fx)` = resolved state (lane OR pad OR MIDI OR automation).
+  `FxSettings::engaged` is only the manual trigger input. **Always use the former for
+  UI feedback** — using the latter is a bug the tests caught once already.
 
 ---
 
@@ -156,14 +176,15 @@ In Ableton:
 |---|---|---|
 | 1 | Build + fix the JUCE layer | non-negotiable first step |
 | 2 | Real-instrument pass | audition every engine + FX, tune default levels and FX macros so it sounds good out of the box (`PluginProcessor` ctor + `defaultAmounts/ParamA/ParamB` in `ParamIDs.cpp`) |
-| 3 | Per-step pitch editing UI | the p-lock panel edits the selected step; a roll view (drag note in a mini piano-roll per track) would make it much faster to use |
-| 4 | Pattern chaining / song mode | add a `Pattern` bank (e.g. 8 patterns) + a chain list; keep `Engine` holding the *active* pattern and swap at bar boundaries |
-| 5 | Copy/paste bars, clear track, randomise | pure UI + `Pattern` helpers; `euclideanMask()` and the brains give you the randomiser for free |
-| 6 | Punch FX recording into automation | when a pad is held, write the `fx_*_on` parameter via `setValueNotifyingHost` so the gesture can be captured by the host |
-| 7 | Tempo-synced FX macros | stutter slice / delay time in note values from the host BPM rather than free seconds |
-| 8 | Sample playback per track | biggest remaining feature; add a `SampleEngine` next to `SynthEngine` behind the same `StepEvent` interface, load from a `FileChooser` in the mixer |
-| 9 | MIDI learn for punch pads | map CC → `fx_*_on`, or notes → pads (already partly done in `handleIncomingMidi`) |
-| 10 | Presets | `AudioProcessor::getNumPrograms` is 1; a small factory preset list of patterns would show the instrument off |
+| 3 | Punch-lane UI polish | the grid's `FX LANES` mode toggles 0/1 values only. Add: drag to set an amount (vertical drag), per-lane length, a lane clear/randomise button, and a "record pad presses into the lane" mode (arm, hold pads while the transport runs, write the gesture into the lane at the current step) |
+| 4 | Per-step pitch editing UI | the p-lock panel edits the selected step; a roll view (drag note in a mini piano-roll per track) would make it much faster to use |
+| 5 | Pattern chaining / song mode | add a `Pattern` bank (e.g. 8 patterns) + a chain list; keep `Engine` holding the *active* pattern and swap at bar boundaries |
+| 6 | Copy/paste bars, clear track, randomise | pure UI + `Pattern` helpers; `euclideanMask()` and the brains give you the randomiser for free |
+| 7 | Punch FX recording into automation | when a pad is held, write the `fx_*_on` parameter via `setValueNotifyingHost` so the gesture can be captured by the host |
+| 8 | Tempo-synced FX macros | stutter slice / delay time in note values from the host BPM rather than free seconds |
+| 9 | Sample playback per track | biggest remaining feature; add a `SampleEngine` next to `SynthEngine` behind the same `StepEvent` interface, load from a `FileChooser` in the mixer |
+| 10 | MIDI learn for punch pads | map CC → `fx_*_on`, or notes → pads (already partly done in `handleIncomingMidi`) |
+| 11 | Presets | `AudioProcessor::getNumPrograms` is 1; a small factory preset list of patterns would show the instrument off |
 
 ---
 
@@ -195,6 +216,13 @@ In Ableton:
   driving other instruments; not sample-accurate.
 * **`getFxNoteBase()`** returns the cached value updated during `processBlock`, so the
   editor shows it correctly only after the first block runs.
+* **Punch-lane editing is binary in the UI** (a lane step is 0 or 1). The engine
+  supports any amount 0..1 and the serialiser round-trips it; only the grid's drag
+  gesture is missing. Same for per-lane length (`Pattern::fxLaneSteps` is global).
+* **Lanes are not host-automatable.** They are pattern data (saved in the state blob),
+  not APVTS parameters, so a host cannot automate a lane. If that turns out to matter,
+  expose a single `fx_*_seq` boolean parameter per FX and keep the lane values in the
+  pattern.
 
 ---
 

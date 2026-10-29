@@ -22,10 +22,12 @@ Source/Plugin (JUCE)                    Source/Core (plain C++17)
 ## Per-block signal flow (`Engine::processChunk`)
 
 1. **Clear per-track buffers** (8 × stereo × `kMaxBlockSize`).
-2. **FX routing**: for each of the six FX, decide which bus is armed (master or focus
-   track) and push amount / macros / ramp from `FxSettings`.
-3. **Sequencer** produces `StepEvent`s with sample offsets inside the block. P-locks
+2. **Sequencer** produces `StepEvent`s with sample offsets inside the block. P-locks
    are resolved *here*, at fire time, so each note carries its own cutoff/decay/pan.
+3. **FX routing** (after the clock, so the punch lanes resolve against this block's
+   step): for each of the six FX, combine the trigger sources — pad/MIDI/automation
+   hold **or** a sequenced punch lane — scale the wet amount by trigger velocity, then
+   push amount / macros / ramp to whichever bus is armed (master or focus track).
 4. **Voices are started at their exact offsets**, and the block is rendered in
    segments between events (`renderVoices(pos, count)`).
 5. **Focus-track FX** run on that track's stereo buffer only.
@@ -56,6 +58,7 @@ Source/Plugin (JUCE)                    Source/Core (plain C++17)
 | Step playhead for LEDs | audio → UI | `std::atomic<int>` per track in `Sequencer` |
 | Peak meter | audio → UI | `std::atomic<float>` in `Engine` |
 | Automation values | host → audio | `APVTS` raw parameter pointers, cached in the processor |
+| Sequenced punch-FX lanes | UI + audio | `std::atomic` cells on `opxy::Pattern` |
 | Whole-pattern save/load | message thread | text blob via `PatternState`, stored in the state `ValueTree` |
 
 The message thread only ever writes single atomics, so an edit can never tear. There is
@@ -84,6 +87,24 @@ The original brief was an audio effect. The user picked "instrument with interna
 voices" so the plugin is self-contained: sequencer → synth → punch FX all inside one
 plugin, no external sound source needed. It still emits MIDI (opt-in) so the sequencer
 can drive other tracks if you want.
+
+## Splitting into two plugins (not done, deliberately)
+
+The FX engine (`PunchInFx` subclasses + `FxChain` + `FxSettings`) has **no dependency on
+the sequencer** — `FxChain::prepare(sampleRate, maxBlockSize)` and `process(l, r, n)` is
+the whole interface. So a separate "Seq Queen FX" audio-effect plugin, and/or a
+sequencer-only build, could be added as an extra CMake target reusing `opxy_core`,
+without touching the DSP.
+
+It is not done because the killer feature — sequencing the punches — needs both halves
+in one process: the lane has to resolve against the same 16th grid that triggers the
+notes, and the FX must be able to target a single internal track. Splitting now would
+mean routing MIDI from one plugin into another just to recreate a feature that is
+trivial in-process (and fragile: AU effects don't accept MIDI in Live).
+
+If you do want a standalone FX plugin later, add a second `juce_add_plugin` target whose
+processor owns an `FxChain` + `FxSettings[6]` and a gain stage, and reuse
+`Source/Plugin/Components/PunchPads.*` as its UI. Budget a day.
 
 ## Extending it
 

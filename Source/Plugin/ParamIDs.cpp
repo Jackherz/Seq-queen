@@ -119,6 +119,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         addFloat (fxId (f, "a"), prefix + "Macro A", Range (0.0f, 1.0f, 0.001f), defaultParamA[f]);
         addFloat (fxId (f, "b"), prefix + "Macro B", Range (0.0f, 1.0f, 0.001f), defaultParamB[f]);
         addFloat (fxId (f, "ramp"), prefix + "Ramp", Range (0.002f, 0.3f, 0.001f), 0.03f);
+        // How much note velocity scales the punch strength (0 = ignore).
+        addFloat (fxId (f, "velamt"), prefix + "Velocity Amount", Range (0.0f, 1.0f, 0.001f), 0.7f);
         addChoice (fxId (f, "target"), prefix + "Target", fxTargetChoices(), 0);
 
         // Automatable momentary state: a host curve or a MIDI CC can punch FX.

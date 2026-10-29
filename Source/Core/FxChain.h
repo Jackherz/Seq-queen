@@ -24,6 +24,14 @@ struct FxSettings
     std::atomic<int>   target  { static_cast<int> (FxTarget::Master) };
     std::atomic<float> rampSeconds { 0.03f };
 
+    // Velocity of the trigger that last punched this FX (1.0 = full strength).
+    // Set from MIDI note-on velocity, or 1.0 for a pad press.
+    std::atomic<float> velocity { 1.0f };
+
+    // How much velocity scales the wet amount: 0 = ignore velocity,
+    // 1 = fully proportional (a soft hit barely punches).
+    std::atomic<float> velocitySensitivity { 0.7f };
+
     FxSettings() = default;
     FxSettings (const FxSettings&) = delete;
     FxSettings& operator= (const FxSettings&) = delete;

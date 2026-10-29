@@ -120,6 +120,7 @@ void SeqQueenAudioProcessor::cacheParameterPointers()
         p.ramp         = get (opxy::params::fxId (f, "ramp"));
         p.target       = get (opxy::params::fxId (f, "target"));
         p.automationOn = get (opxy::params::fxId (f, "on"));
+        p.velocityAmount = get (opxy::params::fxId (f, "velamt"));
     }
 }
 
@@ -162,6 +163,7 @@ void SeqQueenAudioProcessor::pushParametersToEngine()
         if (p.macroB != nullptr) settings.paramB.store (p.macroB->load());
         if (p.ramp != nullptr)   settings.rampSeconds.store (p.ramp->load());
         if (p.target != nullptr) settings.target.store (static_cast<int> (std::lround (p.target->load())));
+        if (p.velocityAmount != nullptr) settings.velocitySensitivity.store (p.velocityAmount->load());
 
         const bool automated = p.automationOn != nullptr && p.automationOn->load() > 0.5f;
         const bool held = uiHeld[f].load() || midiHeld[f].load();
@@ -270,6 +272,9 @@ void SeqQueenAudioProcessor::handleIncomingMidi (const juce::MidiBuffer& midiMes
             if (fxNotesEnabled && fxIndex >= 0 && fxIndex < opxy::kMaxFx)
             {
                 midiHeld[fxIndex].store (message.isNoteOn());
+                // Velocity is part of the gesture: tap = subtle, hit = destroy.
+                if (message.isNoteOn())
+                    engine.setPunchVelocity (fxIndex, message.getFloatVelocity());
                 continue;
             }
 
@@ -347,8 +352,14 @@ void SeqQueenAudioProcessor::writeGeneratedMidi (juce::MidiBuffer& midiMessages,
 
 void SeqQueenAudioProcessor::setPunchHeld (int fxIndex, bool held)
 {
-    if (fxIndex >= 0 && fxIndex < opxy::kMaxFx)
-        uiHeld[fxIndex].store (held);
+    if (fxIndex < 0 || fxIndex >= opxy::kMaxFx)
+        return;
+
+    uiHeld[fxIndex].store (held);
+
+    // A pad has no velocity, so treat it as a full strength hit.
+    if (held)
+        engine.setPunchVelocity (fxIndex, 1.0f);
 }
 
 bool SeqQueenAudioProcessor::isPunchHeld (int fxIndex) const
@@ -360,9 +371,9 @@ bool SeqQueenAudioProcessor::isPunchHeld (int fxIndex) const
 
 bool SeqQueenAudioProcessor::isPunchEngaged (int fxIndex) const
 {
-    if (fxIndex < 0 || fxIndex >= opxy::kMaxFx)
-        return false;
-    return engine.getFxSettings (fxIndex).engaged.load();
+    // Resolved state: true when punched by a pad, a MIDI note, automation, *or*
+    // a sequenced punch lane, so the pad lights up either way.
+    return engine.isFxEngaged (fxIndex);
 }
 
 // -------------------------------- state ------------------------------------

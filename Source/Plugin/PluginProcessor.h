@@ -96,6 +96,7 @@ private:
         std::atomic<float>* macroB = nullptr;
         std::atomic<float>* ramp = nullptr;
         std::atomic<float>* target = nullptr;
+        std::atomic<float>* velocityAmount = nullptr;
         std::atomic<float>* automationOn = nullptr;
     };
 

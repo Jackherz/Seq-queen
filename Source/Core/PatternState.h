@@ -13,10 +13,14 @@
 //  forward compatible: unknown keys are ignored by the parser.
 //
 //  Format:
-//      opxy-steps v1
+//      opxy-steps v2
 //      t0 s3 a=1 n=38 v=0.9 g=0.25 r=2 d=0.03 p=cutoff:800,res:0.4
+//      x2 on=1 len=16
+//      x2 s5 v=0.8
 //
-//  `p=` entries are p-locks: <paramId>:<value>.
+//  `p=` entries are p-locks: <paramId>:<value>. `x<fx>` lines are the sequenced
+//  punch-FX lanes (v2+): `on`/`len` configures the lane, `s<step> v=<amount>` sets
+//  one lane step. v1 blobs (no `x` lines) still load; lanes just come up empty.
 // -----------------------------------------------------------------------------
 
 #include "Pattern.h"

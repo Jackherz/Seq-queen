@@ -282,6 +282,37 @@ int main (int argc, char** argv)
     reverb.target.store (static_cast<int> (opxy::FxTarget::Master));
     crush.target.store (static_cast<int> (opxy::FxTarget::Master));
 
+    // --- sequenced punch FX ---------------------------------------------------
+    // These are driven by the pattern's punch lanes rather than by the punch
+    // list below: the sequencer fires them, which is the workflow this plugin
+    // exists for. Bars 13-14 stutter the whole mix in 16ths; bar 15 tape-stops
+    // on the "and" of every beat; bar 16 stays clean for the outro gesture.
+    const int stutterLane = static_cast<int> (opxy::FxType::Stutter);
+    const int tapeLane    = static_cast<int> (opxy::FxType::TapeStop);
+    const int crushLane   = static_cast<int> (opxy::FxType::Bitcrush);
+
+    pattern.setFxLaneEnabled (stutterLane, true);
+    for (int step = 0; step < 16; ++step)
+        pattern.setFxLaneStep (stutterLane, step, (step % 2 == 0) ? 1.0f : 0.0f);
+
+    pattern.setFxLaneEnabled (tapeLane, true);
+    for (int step = 0; step < 16; ++step)
+        pattern.setFxLaneStep (tapeLane, step, (step % 8 == 3) ? 1.0f : 0.0f);
+
+    pattern.setFxLaneEnabled (crushLane, true);
+    pattern.setFxLaneStep (crushLane, 2, 0.8f);
+    pattern.setFxLaneStep (crushLane, 6, 0.5f);
+
+    // The lanes only drive FX while their own bar window is open, so gate them
+    // with a per-bar enable below (bars 13-16).
+    const auto applyLanes = [&] (int bar)
+    {
+        const bool lanesOpen = bar >= 12 && bar <= 15;
+        pattern.setFxLaneEnabled (stutterLane, lanesOpen && bar == 12);
+        pattern.setFxLaneEnabled (tapeLane, lanesOpen && bar == 14);
+        pattern.setFxLaneEnabled (crushLane, lanesOpen && bar == 13);
+    };
+
     // --- the performance -----------------------------------------------------
     std::vector<PunchEvent> punches = {
         { barTime (6) + 2 * kSecondsPerBeat, barTime (6) + 3.6 * kSecondsPerBeat,
@@ -383,9 +414,11 @@ int main (int argc, char** argv)
             pattern.tracks[4].probability.store (1.0f);
         }
 
-        // Punch engagement.
+        // Punch engagement (manual gestures) and the sequenced lanes.
         for (int f = 0; f < opxy::kMaxFx; ++f)
             engine.getFxSettings (f).engaged.store (false);
+
+        applyLanes (bar);
 
         for (const auto& punch : punches)
             if (seconds >= punch.startSeconds && seconds < punch.endSeconds)
@@ -418,6 +451,11 @@ int main (int argc, char** argv)
     std::printf ("  bars 1-2   kick + hats\n");
     std::printf ("  bars 3-4   + bass\n");
     std::printf ("  bars 5-6   + lead (p-locked cutoff/resonance/pitch) + clap\n");
+    std::printf ("\nsequenced punch lanes (fired by the step sequencer, not by hand):\n");
+    std::printf ("  bar 13   stutter lane: every 16th (whole mix)\n");
+    std::printf ("  bar 14   bitcrush lane: steps 3 and 7\n");
+    std::printf ("  bar 15   tape stop lane: the 'and' of each beat (step 4, 12)\n");
+    std::printf ("\nmanual punches:\n");
     for (const auto& punch : punches)
         std::printf ("  bar %2d    %s punch (%.2fs - %.2fs)\n",
                      static_cast<int> (punch.startSeconds / (kBarBeats * kSecondsPerBeat)) + 1,

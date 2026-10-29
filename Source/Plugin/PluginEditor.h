@@ -34,6 +34,7 @@ private:
     juce::ComboBox focusTrack, visibleSteps;
     juce::TextButton midiOutButton { "MIDI OUT" };
     juce::TextButton fxNotesButton { "FX NOTES" };
+    juce::TextButton laneModeButton { "FX LANES" };
     juce::Label status;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> masterGainAtt, swingAtt, tempoAtt;

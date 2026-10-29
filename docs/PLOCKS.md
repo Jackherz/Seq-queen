@@ -65,8 +65,30 @@ Momentary by design: hold → effect ramps in; release → ramps out. Two behavi
 (`focus_track` parameter). Two chains exist so you can, for example, stutter the lead
 while the reverb hits the whole mix.
 
-**Ways to trigger**: hold a pad, hold a MIDI note in the FX range (default C1–F1), or
-automate the `fx_*_on` parameter.
+**Ways to trigger**:
+
+* hold a pad (full strength);
+* hold a MIDI note in the FX range (default C1–F1) — **the note's velocity scales the
+  punch**, so a soft hit is a gentle punch and a hard one is full-on (per-FX
+  `Velocity Amount`, default 70%, 0 = ignore velocity);
+* automate the `fx_*_on` parameter;
+* **sequence it** on the FX's punch lane (below).
+
+## Sequenced punch FX (the punch lanes)
+
+Each FX has a 64-step automation lane (`Pattern::fxLane`). Lane value = the punch amount
+for that 16th, 0 = off. The lane follows the pattern clock, so punches stay locked to the
+grid and survive tempo changes and loops.
+
+* The lane **overrides** the amount knob for that step (a lane step of 0.4 is a
+  half-strength punch); velocity scaling does not apply to lane-driven punches, because
+  the lane already states the amount.
+* Consecutive lane steps keep the FX held, so a two-step lane value is a two-step punch
+  and long tails (delay, reverb) behave naturally.
+* The lane is silent while the transport is stopped.
+* `Engine::isFxEngaged(fx)` reports the *resolved* state (lane, pad, MIDI or automation),
+  which is what the UI lights up. `FxSettings::engaged` is only the manual trigger input.
+* Lanes are saved with the pattern (v2 blob, see `PatternState.h`).
 
 ## Tempo and grid
 

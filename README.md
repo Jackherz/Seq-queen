@@ -27,6 +27,8 @@ transport, and the punch-in FX are performed live (pads, MIDI notes, or automati
 | Per-step **p-locks** (pitch, cutoff, resonance, decay, velocity, pan) | done |
 | Brains: probability, Euclidean, ratchet, random pitch/velocity, scale quantise | done |
 | Punch-in FX: tape stop, delay throw, filter sweep, stutter, reverb burst, bitcrush | done |
+| **Sequenced punch FX**: one automation lane per FX, drawn in the sequencer | done |
+| Velocity-sensitive punches (soft hit = gentler punch) | done |
 | Per-FX routing: master bus or focused track | done |
 | Momentary ramped engagement (click-free), tails that ring out after release | done |
 | Synth engines per track: sine / triangle / saw / square / noise + noise layer | done |
@@ -50,6 +52,9 @@ bar 9      filter sweep
 bar 10     stutter (three hits)
 bar 11     reverb burst
 bar 12     bitcrush
+bar 13     stutter **sequenced** on every 16th (fired by the FX lane, not by hand)
+bar 14     bitcrush **sequenced** on steps 3 and 7
+bar 15     tape stop **sequenced** on the "and" of each beat
 bars 13–16 brains: euclidean bass, probability hats, ratchet + minor-scale lead
 ```
 
@@ -100,8 +105,18 @@ ctest --preset core          # or ./build/core/opxy_core_tests
 4. Hold the punch pads (or automate the `… Punch` parameters) for momentary FX.
 
 **Punch-in FX from MIDI:** notes **C1–F1 (36–41)** punch FX 1–6 by default while held;
-change the base note, or turn the mapping off, in the header. Notes outside that range
-play the focused track's engine, so you can jam over the pattern.
+change the base note, or turn the mapping off, in the header. Each pad shows its note
+(C1 = MIDI 36; the number is shown too because DAWs disagree about octave numbering).
+Notes outside that range play the focused track's engine, so you can jam over the pattern.
+
+**Velocity is part of the punch:** a soft MIDI note punches gently, a hard one punches
+fully (`Velocity Amount` per FX, default 70%; pads count as full strength).
+
+**Sequencing the punches:** hit `FX LANES` in the header and the grid swaps to six
+automation lanes — one per FX. Draw where a punch should fire; each lane step carries
+its own amount, so a lane can be a hard stutter rhythm or a half-strength wash.
+Right-click a lane to clear it. This is the OP-XY gesture that makes the plugin what it
+is, and it is why the sequencer and the FX live in the same plugin.
 
 **MIDI out:** enable `MIDI OUT` in the header, then in Live set the track's
 *MIDI To* to another track to drive it. Track 1–8 map to MIDI channels 1–8.
@@ -122,7 +137,7 @@ Source/
     Engine.*           rendering, FX routing, per-track buffers, master
     PatternState.*     step-grid serialisation for save/load
   Plugin/          JUCE wrapper (processor, editor, components)
-tests/CoreTests.cpp    23 tests, no JUCE required
+tests/CoreTests.cpp    28 tests, no JUCE required
 tools/render_demo.cpp  offline demo renderer
 docs/                  architecture, p-lock semantics, how to add an FX
 ```

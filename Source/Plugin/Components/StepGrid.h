@@ -16,8 +16,14 @@ class StepGridComponent : public juce::Component,
                           private juce::Timer
 {
 public:
+    /** The grid edits either the 8 note tracks or the 6 sequenced punch-FX lanes. */
+    enum class Mode { Tracks, FxLanes };
+
     explicit StepGridComponent (SeqQueenAudioProcessor& processor);
     ~StepGridComponent() override = default;
+
+    void setMode (Mode newMode);
+    Mode getMode() const noexcept { return mode; }
 
     void setVisibleSteps (int steps);
     int getVisibleSteps() const noexcept { return visibleSteps; }
@@ -38,7 +44,12 @@ public:
 private:
     void timerCallback() override;
 
-    juce::Rectangle<int> rowBounds (int track) const;
+    int rowCount() const noexcept { return mode == Mode::Tracks ? kMaxTracks : kMaxFx; }
+    juce::Rectangle<int> rowBounds (int row) const;
+    void paintTracks (juce::Graphics& g);
+    void paintFxLanes (juce::Graphics& g);
+    void toggleLaneStep (int fx, int step);
+    void clearLane (int fx);
     juce::Rectangle<float> padBounds (int track, int step) const;
     int trackAt (juce::Point<int> position) const;
     int stepAt (juce::Point<int> position) const;
@@ -48,6 +59,7 @@ private:
     int visibleSteps = 16;
     int selectedTrack = 0;
     int selectedStep = 0;
+    Mode mode = Mode::Tracks;
     bool dragging = false;
     bool dragActiveState = true;
     int lastNotifiedTrack = -1;

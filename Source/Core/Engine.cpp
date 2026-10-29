@@ -31,6 +31,11 @@ Engine::Engine()
     }
     mixL.assign (kMaxBlockSize, 0.0f);
     mixR.assign (kMaxBlockSize, 0.0f);
+
+    for (auto& amount : effectiveAmount)
+        amount.store (0.0f);
+    for (auto& engaged : fxEngaged)
+        engaged.store (false);
 }
 
 void Engine::prepare (double newSampleRate, int newMaxBlockSize)
@@ -119,17 +124,40 @@ void Engine::playNote (int track, int note, float velocity)
 
 void Engine::applyFxRouting()
 {
+    // The lane follows the pattern's own 16th-note clock, so sequenced punches
+    // stay locked to the grid even when the FX is on the master bus.
+    const bool running = sequencer.isRunning();
+    const auto stepIndex = static_cast<std::int64_t> (std::floor (sequencer.getStepPosition()));
+
     for (int f = 0; f < kMaxFx; ++f)
     {
         FxSettings& s = fxSettings[f];
 
-        const bool engaged      = s.engaged.load (std::memory_order_relaxed);
         const bool onFocusTrack = s.target.load (std::memory_order_relaxed)
                                     == static_cast<int> (FxTarget::FocusTrack);
-        const float amount      = s.amount.load (std::memory_order_relaxed);
         const float paramA      = s.paramA.load (std::memory_order_relaxed);
         const float paramB      = s.paramB.load (std::memory_order_relaxed);
         const float ramp        = s.rampSeconds.load (std::memory_order_relaxed);
+
+        // --- trigger sources: automation / pad / MIDI note, and the FX lane ---
+        const bool noteOrPadHeld = s.engaged.load (std::memory_order_relaxed);
+        const float laneValue    = pattern.getFxLaneValue (f, stepIndex, running);
+        const bool laneActive    = laneValue > 0.0005f;
+        const bool engaged       = noteOrPadHeld || laneActive;
+
+        // --- velocity scaling --------------------------------------------------
+        // A soft hit punches less. Sensitivity 0 ignores velocity entirely.
+        const float sensitivity = clamp (s.velocitySensitivity.load (std::memory_order_relaxed), 0.0f, 1.0f);
+        const float velocity    = clamp (s.velocity.load (std::memory_order_relaxed), 0.0f, 1.0f);
+        const float velocityScale = 1.0f - sensitivity * (1.0f - velocity);
+
+        // The lane carries its own amount per step; manual triggers use the knob.
+        const float baseAmount = laneActive ? laneValue
+                                           : s.amount.load (std::memory_order_relaxed);
+        const float amount = clamp (baseAmount * (laneActive ? 1.0f : velocityScale), 0.0f, 1.0f);
+
+        effectiveAmount[f].store (engaged ? amount : 0.0f, std::memory_order_relaxed);
+        fxEngaged[f].store (engaged, std::memory_order_relaxed);
 
         PunchInFx& target = onFocusTrack ? focusChain[f] : masterChain[f];
         PunchInFx& other  = onFocusTrack ? masterChain[f] : focusChain[f];
@@ -200,10 +228,7 @@ void Engine::processChunk (float* const* outputChannels,
         std::fill (trackBuffer[t][1].begin(), trackBuffer[t][1].begin() + numSamples, 0.0f);
     }
 
-    // ---- 2. Momentary FX routing / parameter updates ------------------------
-    applyFxRouting();
-
-    // ---- 3. Sequencer events for this chunk ---------------------------------
+    // ---- 2. Sequencer events for this chunk ---------------------------------
     StepEvent events[kMaxEventsPerBlock];
     const int numEvents = sequencer.process (pattern, transport, numSamples, events, kMaxEventsPerBlock);
 
@@ -213,6 +238,11 @@ void Engine::processChunk (float* const* outputChannels,
         lastEvents[lastEventCount].sampleOffset += outputOffset;
         ++lastEventCount;
     }
+
+    // ---- 3. Momentary FX routing / parameter updates ------------------------
+    // Done after the clock so the sequenced punch lanes resolve against the step
+    // this block actually starts on (and so the very first block is correct).
+    applyFxRouting();
 
     // ---- 4. Render voices, starting notes at their exact sample offsets ------
     samplesPerStepCache = sequencer.getSamplesPerStep();

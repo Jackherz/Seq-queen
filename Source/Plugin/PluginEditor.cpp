@@ -91,6 +91,24 @@ SeqQueenAudioProcessorEditor::SeqQueenAudioProcessorEditor (SeqQueenAudioProcess
         state, "fx_notes", fxNotesButton);
     fxNotesButton.setColour (juce::TextButton::buttonOnColourId, opxy::theme::accentAlt);
 
+    // Swaps the grid between the 8 note tracks and the 6 sequenced punch lanes.
+    laneModeButton.setClickingTogglesState (true);
+    opxy::theme::styleToggle (laneModeButton);
+    laneModeButton.setColour (juce::TextButton::buttonOnColourId, opxy::theme::accentAlt);
+    laneModeButton.onClick = [this]
+    {
+        const bool lanes = laneModeButton.getToggleState();
+        stepGrid.setMode (lanes ? opxy::StepGridComponent::Mode::FxLanes
+                                : opxy::StepGridComponent::Mode::Tracks);
+        setStatusMessage (lanes
+            ? "FX lanes: draw where each punch-in FX fires. Right-click a lane to clear it."
+            : "Hold a punch pad, or send MIDI notes "
+                + juce::String (proc.getFxNoteBase()) + "-"
+                + juce::String (proc.getFxNoteBase() + opxy::kMaxFx - 1)
+                + " to punch the six FX.");
+    };
+    addAndMakeVisible (laneModeButton);
+
     status.setFont (opxy::theme::monoFont (10.0f));
     status.setColour (juce::Label::textColourId, opxy::theme::textDim);
     status.setJustificationType (juce::Justification::centredLeft);
@@ -172,6 +190,8 @@ void SeqQueenAudioProcessorEditor::resized()
     visibleSteps.setBounds (header.removeFromLeft (92).withHeight (22).withY (header.getY() + 6));
 
     header.removeFromLeft (10);
+    laneModeButton.setBounds (header.removeFromLeft (86).withHeight (22).withY (header.getY() + 6));
+    header.removeFromLeft (6);
     midiOutButton.setBounds (header.removeFromLeft (82).withHeight (22).withY (header.getY() + 6));
     header.removeFromLeft (6);
     fxNotesButton.setBounds (header.removeFromLeft (82).withHeight (22).withY (header.getY() + 6));

@@ -151,13 +151,32 @@ struct Track
     }
 };
 
-/** The whole 8-track pattern. Non-copyable because the steps hold atomics;
-    save/load goes through the serialiser in PatternState.h instead. */
+/** The whole 8-track pattern plus the sequencer's punch-FX lanes.
+    Non-copyable because the fields are atomics; save/load goes through the
+    serialiser in PatternState.h instead. */
 struct Pattern
 {
     Track tracks[kMaxTracks];
 
-    Pattern() = default;
+    // --- sequenced punch-in FX ------------------------------------------------
+    // One automation lane per FX type. Lane value = punch amount for that 16th
+    // (0 = off). This is what lets the sequencer drive the FX: a stutter rhythm,
+    // a tape stop on bar 4, a filter sweep every 8 bars. It is also the reason
+    // the sequencer and the FX live in one plugin (see HANDOFF.md).
+    std::atomic<float> fxLane[kMaxFx][kMaxSteps];
+    std::atomic<bool>  fxLaneEnabled[kMaxFx];
+    std::atomic<int>   fxLaneSteps { 16 };   // lane length, 1..kMaxSteps
+
+    Pattern()
+    {
+        for (int f = 0; f < kMaxFx; ++f)
+        {
+            fxLaneEnabled[f].store (false);
+            for (int s = 0; s < kMaxSteps; ++s)
+                fxLane[f][s].store (0.0f);
+        }
+    }
+
     Pattern (const Pattern&) = delete;
     Pattern& operator= (const Pattern&) = delete;
 
@@ -167,6 +186,57 @@ struct Pattern
         for (auto& track : tracks)
             for (auto& step : track.steps)
                 step.active.store (false);
+    }
+
+    int getLaneLength() const noexcept
+    {
+        return clamp (fxLaneSteps.load (std::memory_order_relaxed), 1, kMaxSteps);
+    }
+
+    void setFxLaneStep (int fx, int step, float value) noexcept
+    {
+        if (fx < 0 || fx >= kMaxFx || step < 0 || step >= kMaxSteps)
+            return;
+        fxLane[fx][step].store (clamp (value, 0.0f, 1.0f), std::memory_order_relaxed);
+    }
+
+    float getFxLaneStep (int fx, int step) const noexcept
+    {
+        if (fx < 0 || fx >= kMaxFx || step < 0 || step >= kMaxSteps)
+            return 0.0f;
+        return fxLane[fx][step].load (std::memory_order_relaxed);
+    }
+
+    void setFxLaneEnabled (int fx, bool enabled) noexcept
+    {
+        if (fx >= 0 && fx < kMaxFx)
+            fxLaneEnabled[fx].store (enabled, std::memory_order_relaxed);
+    }
+
+    bool isFxLaneEnabled (int fx) const noexcept
+    {
+        if (fx < 0 || fx >= kMaxFx)
+            return false;
+        return fxLaneEnabled[fx].load (std::memory_order_relaxed);
+    }
+
+    void clearFxLane (int fx) noexcept
+    {
+        if (fx < 0 || fx >= kMaxFx)
+            return;
+        for (int s = 0; s < kMaxSteps; ++s)
+            fxLane[fx][s].store (0.0f, std::memory_order_relaxed);
+    }
+
+    /** Lane value for the current 16th, or 0 when the lane is off / stopped. */
+    float getFxLaneValue (int fx, std::int64_t stepIndex, bool transportRunning) const noexcept
+    {
+        if (! transportRunning || ! isFxLaneEnabled (fx))
+            return 0.0f;
+
+        const int length = getLaneLength();
+        const int wrapped = static_cast<int> (((stepIndex % length) + length) % length);
+        return getFxLaneStep (fx, wrapped);
     }
 };
 
