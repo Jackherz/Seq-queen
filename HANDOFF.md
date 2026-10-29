@@ -1,11 +1,30 @@
 # Handoff — read this before touching anything
 
-You are picking up **Seq Queen**, an OP-XY-inspired instrument plugin: an 8-track
-p-lock step sequencer plus six momentary punch-in FX, written in C++17 + JUCE 8.
+You are picking up **Seq Queen**: OP-XY-style punch-in effects for Ableton, written
+in C++17 + JUCE 8. As of 2026-10-29 it is **two devices** that leave sequencing to
+the host (see decision 7):
 
-The architecture is in two halves:
+* **Seq Queen FX** (`Source/Devices/FxPlugin`, core `FxBus`): the six punch-in
+  FX as an audio effect, triggered by pads, MIDI notes C1–F1 from a clip routed in
+  with *MIDI To*, or automation.
+* **Seq Queen Notes** (`Source/Devices/NotesPlugin`, core `NoteFx`): twelve
+  OP-XY-style note punches (mute, repeat, fill, half fill, kick+snare, hats, octave
+  up/down, shorten, random, skip, echo). An instrument that outputs MIDI and
+  silence, because Live won't host third-party MIDI effects; the instrument track
+  takes it as *MIDI From*. Trigger notes are C-2–B-2 so they never collide with a
+  Drum Rack.
 
-* **`Source/Core/` — JUCE-free engine.** 28 unit tests, ~82k assertions, all
+Both pass auval and pluginval strictness 8 (VST3 + AU). **Neither has been tried in
+Live yet.** The user found the all-in-one instrument confusing and overwhelming,
+which is why it was split; keep the devices simple and self-explaining (every pad
+says what it does, every knob has a real name and unit).
+
+The original instrument (**Seq Queen**, `Source/Plugin`) still builds and is
+described below; nothing new should go into it unless the user asks.
+
+The engine is in two halves:
+
+* **`Source/Core/` — JUCE-free engine.** 40 unit tests, ~82k assertions, all
   green, and it renders the audio in `demo/opxy_demo.wav`.
 * **`Source/Plugin/` — JUCE wrapper.** Builds and links on macOS (Apple clang 17,
   SDK 26.2, arm64) into VST3, AU and Standalone with zero warnings from the
@@ -53,7 +72,7 @@ Engine only — no JUCE needed, so this must always work, on any machine:
 ```bash
 cmake --preset core
 cmake --build --preset core
-ctest --preset core                      # 28 tests
+ctest --preset core                      # 40 tests
 ./build/core/opxy_demo demo/opxy_demo.wav
 ```
 
@@ -159,15 +178,19 @@ docs/ADDING_AN_FX.md             recipe for adding a seventh punch-in effect
 6. **The instrument makes its own sound.** The original brief proposed an audio
    effect; the user chose "instrument with internal voices", so `IS_SYNTH TRUE` and
    there is no input bus.
-7. **The sequencer and the punch FX stay in one plugin.** It was worth considering a
-   split (sequencer plugin + FX plugin) — the answer is no, because the user's favourite
-   OP-XY feature is *sequencing the punches*, and that needs both halves in one process:
-   the punch lane resolves against the same 16th grid that fires the notes, and an FX
-   must be able to target one internal track. Across two plugins that becomes MIDI
-   routing into an effect, which AU in Live doesn't even support. The FX engine is
-   sequencer-independent though (`FxChain` + `FxSettings`), so a standalone FX-only
-   build can be added later as an extra target — see `docs/ARCHITECTURE.md`
-   ("Splitting into two plugins"), budget a day.
+7. **The host sequences; Seq Queen punches (reversed 2026-10-29).** This used to
+   say "keep the sequencer and the FX in one plugin" so punches could be sequenced
+   on the same grid as the notes. The user found the all-in-one plugin confusing and
+   wants to use Live's own sequencer, so it is now two devices. Sequencing the
+   punches still works: they are notes in a Live clip, on Live's grid. The costs,
+   accepted knowingly: routing (MIDI To / MIDI From) instead of one device, VST3 for
+   reliable MIDI routing in Live, and no "target one internal track" option (put Seq
+   Queen FX on that track instead).
+8. **NoteFx guarantees a note-off for every note-on it sends**, including when a
+   trigger is released mid-note (the off follows the note's *output* pitch) and
+   when the pending queue fills up (note-ons give way first). The random-abuse test
+   `noteFxNeverLeavesANoteHangingUnderRandomAbuse` is the guard. Fills wait 2 ms
+   before committing so a real note landing just after the grid point wins.
 
 ### Punch triggering: velocity and lanes
 
@@ -208,17 +231,20 @@ In Ableton:
 
 | # | Task | Notes |
 |---|---|---|
-| 1 | Ableton smoke test | the build, auval and pluginval pass; nobody has played it in Live yet (section 4) |
-| 2 | Real-instrument pass | audition every engine + FX, tune default levels and FX macros so it sounds good out of the box (`PluginProcessor` ctor + `defaultAmounts/ParamA/ParamB` in `ParamIDs.cpp`) |
-| 3 | Punch-lane UI polish | the grid's `FX LANES` mode toggles 0/1 values only. Add: drag to set an amount (vertical drag), per-lane length, a lane clear/randomise button, and a "record pad presses into the lane" mode (arm, hold pads while the transport runs, write the gesture into the lane at the current step) |
-| 4 | Per-step pitch editing UI | the p-lock panel edits the selected step; a roll view (drag note in a mini piano-roll per track) would make it much faster to use |
-| 5 | Pattern chaining / song mode | add a `Pattern` bank (e.g. 8 patterns) + a chain list; keep `Engine` holding the *active* pattern and swap at bar boundaries |
-| 6 | Copy/paste bars, clear track, randomise | pure UI + `Pattern` helpers; `euclideanMask()` and the brains give you the randomiser for free |
-| 7 | Punch FX recording into automation | when a pad is held, write the `fx_*_on` parameter via `setValueNotifyingHost` so the gesture can be captured by the host |
-| 8 | Tempo-synced FX macros | stutter slice / delay time in note values from the host BPM rather than free seconds |
-| 9 | Sample playback per track | biggest remaining feature; add a `SampleEngine` next to `SynthEngine` behind the same `StepEvent` interface, load from a `FileChooser` in the mixer |
-| 10 | MIDI learn for punch pads | map CC → `fx_*_on`, or notes → pads (already partly done in `handleIncomingMidi`) |
-| 11 | Presets | `AudioProcessor::getNumPrograms` is 1; a small factory preset list of patterns would show the instrument off |
+| 1 | Try both devices in Live | follow README "In Ableton". Check: MIDI To reaches Seq Queen FX; MIDI From picks up Seq Queen Notes; fills/hats lock to Live's grid; no stuck notes when stopping mid-punch |
+| 2 | Tune the punches | FX defaults in `FxProcessor.cpp` (`kDefault*`); note punch voicings (kick/snare pattern, hat accents, echo level) in `NoteFx::handleTick/handleInput` |
+| 3 | Melodic punches | the OP-XY's melodic octave is undocumented; good candidates: arpeggiate held chord, fifth/octave stack, strum, reverse order |
+| 4 | Decide the original instrument's fate | ask the user before removing `Source/Plugin` |
+| — | *(older list, for the original instrument)* | |
+| – | Punch-lane UI polish | the grid's `FX LANES` mode toggles 0/1 values only. Add: drag to set an amount (vertical drag), per-lane length, a lane clear/randomise button, and a "record pad presses into the lane" mode (arm, hold pads while the transport runs, write the gesture into the lane at the current step) |
+| – | Per-step pitch editing UI | the p-lock panel edits the selected step; a roll view (drag note in a mini piano-roll per track) would make it much faster to use |
+| – | Pattern chaining / song mode | add a `Pattern` bank (e.g. 8 patterns) + a chain list; keep `Engine` holding the *active* pattern and swap at bar boundaries |
+| – | Copy/paste bars, clear track, randomise | pure UI + `Pattern` helpers; `euclideanMask()` and the brains give you the randomiser for free |
+| – | Punch FX recording into automation | when a pad is held, write the `fx_*_on` parameter via `setValueNotifyingHost` so the gesture can be captured by the host |
+| – | Tempo-synced FX macros | stutter slice / delay time in note values from the host BPM rather than free seconds |
+| – | Sample playback per track | biggest remaining feature; add a `SampleEngine` next to `SynthEngine` behind the same `StepEvent` interface, load from a `FileChooser` in the mixer |
+| – | MIDI learn for punch pads | map CC → `fx_*_on`, or notes → pads (already partly done in `handleIncomingMidi`) |
+| – | Presets | `AudioProcessor::getNumPrograms` is 1; a small factory preset list of patterns would show the instrument off |
 
 ---
 

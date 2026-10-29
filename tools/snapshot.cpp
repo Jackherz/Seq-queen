@@ -6,10 +6,13 @@
 //
 // Runs the starter groove for two seconds so the playhead and meters have
 // something to show, then writes main.png (note tracks) and lanes.png (the
-// punch-FX lanes view). Also prints the output peak and rough processing and
-// drawing costs.
+// punch-FX lanes view), then fx.png and notes.png for the two devices with a
+// pad held in each. Also prints the output peak and rough processing and
+// drawing costs of the instrument.
 
 #include "../Source/Plugin/PluginProcessor.h"
+#include "../Source/Devices/FxPlugin/FxProcessor.h"
+#include "../Source/Devices/NotesPlugin/NotesProcessor.h"
 
 #include <iostream>
 
@@ -18,10 +21,10 @@ namespace
 constexpr double kSampleRate = 48000.0;
 constexpr int kBlock = 512;
 
-float play (SeqQueenAudioProcessor& proc, double seconds)
+float play (juce::AudioProcessor& proc, double seconds)
 {
     float peak = 0.0f;
-    juce::AudioBuffer<float> buffer (proc.getTotalNumOutputChannels(), kBlock);
+    juce::AudioBuffer<float> buffer (juce::jmax (proc.getTotalNumInputChannels(), proc.getTotalNumOutputChannels()), kBlock);
     juce::MidiBuffer midi;
     for (int done = 0; done < static_cast<int> (seconds * kSampleRate); done += kBlock)
     {
@@ -42,7 +45,7 @@ void snapshot (juce::Component& editor, const juce::File& file)
     std::cout << file.getFullPathName() << "\n";
 }
 
-void settle (SeqQueenAudioProcessor& proc)
+void settle (juce::AudioProcessor& proc)
 {
     play (proc, 0.05);
     juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
@@ -96,5 +99,29 @@ int main (int argc, char* argv[])
 
     editor = nullptr;
     proc.releaseResources();
+
+    // ---- Seq Queen FX: bitcrush held ------------------------------------------
+    {
+        SeqQueenFxProcessor fx;
+        fx.setRateAndBufferSizeDetails (kSampleRate, kBlock);
+        fx.prepareToPlay (kSampleRate, kBlock);
+        fx.setPadHeld (static_cast<int> (opxy::FxType::Bitcrush), true);
+        std::unique_ptr<juce::AudioProcessorEditor> fxEditor (fx.createEditor());
+        fxEditor->setVisible (true);
+        settle (fx);
+        snapshot (*fxEditor, outDir.getChildFile ("fx.png"));
+    }
+
+    // ---- Seq Queen Notes: hats held --------------------------------------------
+    {
+        SeqQueenNotesProcessor notes;
+        notes.setRateAndBufferSizeDetails (kSampleRate, kBlock);
+        notes.prepareToPlay (kSampleRate, kBlock);
+        notes.setPadHeld (static_cast<int> (opxy::NoteFxType::Hats), true);
+        std::unique_ptr<juce::AudioProcessorEditor> notesEditor (notes.createEditor());
+        notesEditor->setVisible (true);
+        settle (notes);
+        snapshot (*notesEditor, outDir.getChildFile ("notes.png"));
+    }
     return 0;
 }

@@ -20,11 +20,14 @@
 #include "StutterFx.h"
 #include "ReverbBurstFx.h"
 #include "BitcrushFx.h"
+#include "FxBus.h"
+#include "NoteFx.h"
 
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -1188,6 +1191,329 @@ TEST (rampReachesTargetInAboutTheRequestedTime)
 
     CHECK_NEAR (ramp.getCurrent(), 1.0f, 0.001f);
     CHECK (! ramp.isSmoothing());
+}
+
+// ------------------------------- FX bus (Seq Queen FX) ------------------------
+
+TEST (fxBusPassesAudioUntouchedUntilPunched)
+{
+    opxy::FxBus bus;
+    bus.prepare (kSampleRate, 512);
+
+    std::vector<float> l (512), r (512);
+    double maxError = 0.0;
+    for (int block = 0; block < 20; ++block)
+    {
+        for (int i = 0; i < 512; ++i)
+            l[static_cast<std::size_t> (i)] = r[static_cast<std::size_t> (i)]
+                = static_cast<float> (0.5 * std::sin (0.05 * (block * 512 + i)));
+        const std::vector<float> dry = l;
+        bus.process (l.data(), r.data(), 512);
+        for (int i = 0; i < 512; ++i)
+            maxError = std::max (maxError, static_cast<double> (std::abs (l[static_cast<std::size_t> (i)] - dry[static_cast<std::size_t> (i)])));
+    }
+    CHECK (maxError < 1.0e-6);
+    CHECK (! bus.isEngaged (0));
+}
+
+TEST (fxBusPunchChangesTheSoundAndVelocityScalesIt)
+{
+    const auto deviation = [] (float velocity)
+    {
+        opxy::FxBus bus;
+        bus.prepare (kSampleRate, 256);
+        const int bitcrush = static_cast<int> (opxy::FxType::Bitcrush);
+        bus.getSettings (bitcrush).amount.store (1.0f);
+        bus.getSettings (bitcrush).paramA.store (1.0f);
+        bus.getSettings (bitcrush).velocitySensitivity.store (1.0f);
+        bus.setPunchVelocity (bitcrush, velocity);
+        bus.getSettings (bitcrush).engaged.store (true);
+
+        std::vector<float> l (256), r (256);
+        double sum = 0.0;
+        for (int block = 0; block < 40; ++block)
+        {
+            for (int i = 0; i < 256; ++i)
+                l[static_cast<std::size_t> (i)] = r[static_cast<std::size_t> (i)]
+                    = static_cast<float> (0.5 * std::sin (0.03 * (block * 256 + i)));
+            const std::vector<float> dry = l;
+            bus.process (l.data(), r.data(), 256);
+            if (block >= 10)
+                for (int i = 0; i < 256; ++i)
+                    sum += std::abs (l[static_cast<std::size_t> (i)] - dry[static_cast<std::size_t> (i)]);
+        }
+        CHECK (bus.isEngaged (bitcrush));
+        return sum;
+    };
+
+    const double hard = deviation (1.0f);
+    const double soft = deviation (0.3f);
+    CHECK (hard > 1.0);
+    CHECK (soft < hard * 0.6);
+}
+
+// ------------------------------- note FX (Seq Queen Notes) --------------------
+
+namespace
+{
+struct TimedNote
+{
+    long long time;   // absolute sample
+    int note;
+    float velocity;
+    bool on;
+};
+
+struct NoteRun
+{
+    std::vector<opxy::NoteEvent> events;   // sampleOffset rewritten to absolute time
+};
+
+// Plays `input` through a NoteFx at 120 bpm / 48 kHz (one 16th = 6000 samples)
+// in blocks of `block`, with the transport running from ppq 0.
+NoteRun runNoteFx (opxy::NoteFx& fx, std::vector<TimedNote> input, long long totalSamples,
+                   int block = 512, bool playing = true)
+{
+    std::sort (input.begin(), input.end(), [] (const TimedNote& a, const TimedNote& b) { return a.time < b.time; });
+
+    NoteRun run;
+    std::size_t next = 0;
+    std::vector<opxy::NoteEvent> in, out (1024);
+    const double samplesPerBeat = kSampleRate * 0.5;
+
+    for (long long pos = 0; pos < totalSamples; pos += block)
+    {
+        const int n = static_cast<int> (std::min<long long> (block, totalSamples - pos));
+        in.clear();
+        while (next < input.size() && input[next].time < pos + n)
+        {
+            opxy::NoteEvent e;
+            e.sampleOffset = static_cast<int> (input[next].time - pos);
+            e.note = input[next].note;
+            e.velocity = input[next].velocity;
+            e.on = input[next].on;
+            in.push_back (e);
+            ++next;
+        }
+
+        opxy::TransportInfo transport;
+        transport.playing = playing;
+        transport.hasPpq = playing;
+        transport.bpm = 120.0;
+        transport.ppqAtBlockStart = static_cast<double> (pos) / samplesPerBeat;
+
+        const int count = fx.process (in.data(), static_cast<int> (in.size()), n, transport,
+                                      out.data(), static_cast<int> (out.size()));
+        for (int k = 0; k < count; ++k)
+        {
+            opxy::NoteEvent e = out[static_cast<std::size_t> (k)];
+            e.sampleOffset += static_cast<int> (pos);
+            run.events.push_back (e);
+        }
+    }
+    return run;
+}
+
+int countOns (const NoteRun& run, int note)
+{
+    int count = 0;
+    for (const auto& e : run.events)
+        count += (e.on && e.note == note) ? 1 : 0;
+    return count;
+}
+
+bool everyOnHasAnOff (const NoteRun& run)
+{
+    std::map<int, int> sounding;
+    for (const auto& e : run.events)
+        sounding[e.note] += e.on ? 1 : -1;
+    for (const auto& [note, count] : sounding)
+        if (count != 0)
+            return false;
+    return true;
+}
+
+constexpr long long kSixteenth = 6000;
+constexpr int kTrigger = 0;   // default base note: C-2
+int trig (opxy::NoteFxType type) { return kTrigger + static_cast<int> (type); }
+} // namespace
+
+TEST (noteFxPassesNotesThroughUnchanged)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const auto run = runNoteFx (fx, { { 100, 60, 0.8f, true }, { 3000, 60, 0.0f, false },
+                                      { 7000, 64, 0.5f, true }, { 9000, 64, 0.0f, false } }, 12000);
+    CHECK (run.events.size() == 4);
+    CHECK (run.events[0].note == 60 && run.events[0].on && run.events[0].sampleOffset == 100);
+    CHECK (run.events[3].note == 64 && ! run.events[3].on && run.events[3].sampleOffset == 9000);
+    CHECK_NEAR (run.events[2].velocity, 0.5f, 1.0e-6f);
+}
+
+TEST (noteFxSwallowsTriggersAndMuteDropsNotesAndTheirOffs)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const int mute = trig (opxy::NoteFxType::Mute);
+    const auto run = runNoteFx (fx, { { 0, mute, 1.0f, true },
+                                      { 1000, 60, 0.8f, true }, { 2000, 60, 0.0f, false },
+                                      { 2500, mute, 0.0f, false },
+                                      { 3000, 62, 0.8f, true }, { 4000, 62, 0.0f, false } }, 6000);
+    CHECK (run.events.size() == 2);
+    CHECK (countOns (run, 60) == 0);
+    CHECK (countOns (run, 62) == 1);
+    CHECK (countOns (run, mute) == 0);
+    CHECK (everyOnHasAnOff (run));
+}
+
+TEST (noteFxOctaveUpKeepsNoteOffsMatchedWhenReleasedMidNote)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const int up = trig (opxy::NoteFxType::OctaveUp);
+    // Trigger released while the note is still held: the note-off must still
+    // close the transposed pitch, not the original one.
+    const auto run = runNoteFx (fx, { { 0, up, 1.0f, true }, { 500, 60, 0.8f, true },
+                                      { 1000, up, 0.0f, false }, { 4000, 60, 0.0f, false } }, 6000);
+    CHECK (run.events.size() == 2);
+    CHECK (run.events[0].note == 72 && run.events[0].on);
+    CHECK (run.events[1].note == 72 && ! run.events[1].on);
+}
+
+TEST (noteFxHatsAddSixteenthsOnlyWhileTheTransportRuns)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const int hats = trig (opxy::NoteFxType::Hats);
+    const std::vector<TimedNote> hold { { 0, hats, 1.0f, true } };
+
+    const auto running = runNoteFx (fx, hold, kSixteenth * 16);
+    CHECK (countOns (running, 42) == 16);
+    CHECK (everyOnHasAnOff (running));
+
+    // Offbeat 16ths are quieter than the 8ths.
+    std::vector<float> velocities;
+    for (const auto& e : running.events)
+        if (e.on)
+            velocities.push_back (e.velocity);
+    CHECK (velocities.size() == 16 && velocities[0] > velocities[1]);
+
+    opxy::NoteFx stopped;
+    stopped.prepare (kSampleRate);
+    CHECK (countOns (runNoteFx (stopped, hold, kSixteenth * 16, 512, false), 42) == 0);
+}
+
+TEST (noteFxKickSnareAddsABeat)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::KickSnare), 0.9f, true } }, kSixteenth * 16);
+    CHECK (countOns (run, 36) == 3);
+    CHECK (countOns (run, 38) == 2);
+    CHECK (everyOnHasAnOff (run));
+}
+
+TEST (noteFxFillPlaysTheLastHitOnEmptySixteenthsOnly)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const int fill = trig (opxy::NoteFxType::Fill);
+    // A hit on step 0 and step 8; fill held for the whole bar. Odd block size so
+    // grid points land at awkward offsets.
+    const auto run = runNoteFx (fx, { { 0, fill, 1.0f, true },
+                                      { 0, 40, 0.7f, true }, { 1000, 40, 0.0f, false },
+                                      { kSixteenth * 8, 40, 0.7f, true }, { kSixteenth * 8 + 1000, 40, 0.0f, false } },
+                                kSixteenth * 16, 333);
+    CHECK (countOns (run, 40) == 16);   // 2 real + 14 filled, none doubled
+    CHECK (everyOnHasAnOff (run));
+}
+
+TEST (noteFxHalfFillOnlyUsesEighths)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::HalfFill), 1.0f, true },
+                                      { 0, 40, 0.7f, true }, { 1000, 40, 0.0f, false } },
+                                kSixteenth * 16);
+    CHECK (countOns (run, 40) == 8);
+}
+
+TEST (noteFxRepeatRollsTheLastNoteAtTheChosenRate)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    fx.getSettings().repeatRate.store (2);   // 1/32
+    const auto run = runNoteFx (fx, { { 0, 50, 0.7f, true }, { 1000, 50, 0.0f, false },
+                                      { 1000, trig (opxy::NoteFxType::Repeat), 1.0f, true } },
+                                kSixteenth * 4);
+    CHECK (countOns (run, 50) == 1 + 7);   // the real hit, then every 32nd after it
+    CHECK (everyOnHasAnOff (run));
+}
+
+TEST (noteFxSkipShortenAndEcho)
+{
+    {
+        opxy::NoteFx fx;
+        fx.prepare (kSampleRate);
+        std::vector<TimedNote> input { { 0, trig (opxy::NoteFxType::Skip), 1.0f, true } };
+        for (int k = 0; k < 8; ++k)
+            input.push_back ({ 100 + k * 1000LL, 60 + k, 0.8f, true }),
+            input.push_back ({ 600 + k * 1000LL, 60 + k, 0.0f, false });
+        const auto run = runNoteFx (fx, input, 10000);
+        int ons = 0;
+        for (const auto& e : run.events)
+            ons += e.on ? 1 : 0;
+        CHECK (ons == 4);
+        CHECK (everyOnHasAnOff (run));
+    }
+    {
+        opxy::NoteFx fx;
+        fx.prepare (kSampleRate);
+        const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::Shorten), 1.0f, true },
+                                          { 100, 60, 0.8f, true }, { 20000, 60, 0.0f, false } }, 24000);
+        CHECK (run.events.size() == 2);
+        CHECK (! run.events[1].on && run.events[1].sampleOffset - 100 <= 3000);
+    }
+    {
+        opxy::NoteFx fx;
+        fx.prepare (kSampleRate);
+        const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::Echo), 1.0f, true },
+                                          { 100, 60, 0.8f, true }, { 2000, 60, 0.0f, false } }, 24000);
+        CHECK (countOns (run, 60) == 2);
+        CHECK (everyOnHasAnOff (run));
+        CHECK (run.events.size() == 4 && run.events[2].sampleOffset == 100 + 12000);
+    }
+}
+
+TEST (noteFxNeverLeavesANoteHangingUnderRandomAbuse)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    opxy::Prng prng (1234);
+
+    std::vector<TimedNote> input;
+    long long time = 0;
+    for (int k = 0; k < 400; ++k)
+    {
+        time += 200 + prng.nextInt (4000);
+        if (prng.nextInt (3) == 0)
+        {
+            const int fx12 = prng.nextInt (opxy::kNumNoteFx);
+            input.push_back ({ time, kTrigger + fx12, 1.0f, true });
+            input.push_back ({ time + 500 + prng.nextInt (20000), kTrigger + fx12, 0.0f, false });
+        }
+        else
+        {
+            // Distinct pitch per note so input on/off pairs never overlap.
+            const int note = 30 + (k % 60);
+            input.push_back ({ time, note, 0.8f, true });
+            input.push_back ({ time + 100 + prng.nextInt (8000), note, 0.0f, false });
+        }
+    }
+
+    const auto run = runNoteFx (fx, input, time + 60000, 256);
+    CHECK (run.events.size() > 400);
+    CHECK (everyOnHasAnOff (run));
 }
 
 // ------------------------------------ main ----------------------------------

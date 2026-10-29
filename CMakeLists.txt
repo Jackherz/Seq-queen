@@ -56,6 +56,8 @@ add_library(opxy_core STATIC
     Source/Core/ReverbBurstFx.cpp
     Source/Core/BitcrushFx.cpp
     Source/Core/FxChain.cpp
+    Source/Core/FxBus.cpp
+    Source/Core/NoteFx.cpp
 )
 
 target_include_directories(opxy_core PUBLIC
@@ -165,11 +167,93 @@ if (OPXY_BUILD_PLUGIN)
         JUCE_STRICT_REFCOUNTEDPOINTER=1
     )
 
+    # -------------------------------------------------------------------------
+    #  The two devices: punch FX as an audio effect, note punches as a MIDI
+    #  device. Both leave the sequencing to the host.
+    # -------------------------------------------------------------------------
+    set(OPXY_FX_DEVICE_SOURCES
+        Source/Devices/FxPlugin/FxProcessor.cpp
+        Source/Devices/FxPlugin/FxEditor.cpp)
+    set(OPXY_NOTES_DEVICE_SOURCES
+        Source/Devices/NotesPlugin/NotesProcessor.cpp
+        Source/Devices/NotesPlugin/NotesEditor.cpp)
+
+    function(opxy_finish_device target)
+        juce_generate_juce_header(${target})
+        target_link_libraries(${target}
+            PRIVATE
+                opxy_core
+                juce::juce_audio_utils
+                juce::juce_gui_extra
+            PUBLIC
+                juce::juce_recommended_config_flags
+                juce::juce_recommended_lto_flags
+                juce::juce_recommended_warning_flags)
+        target_compile_definitions(${target} PUBLIC
+            JUCE_WEB_BROWSER=0
+            JUCE_USE_CURL=0
+            JUCE_VST3_CAN_REPLACE_VST2=0
+            JUCE_DISPLAY_SPLASH_SCREEN=0
+            JUCE_REPORT_APP_USAGE=0
+            JUCE_STRICT_REFCOUNTEDPOINTER=1)
+    endfunction()
+
+    # MusicEffect ("aumf") rather than plain Effect so the AU accepts MIDI notes.
+    juce_add_plugin(SeqQueenFX
+        COMPANY_NAME            "Seq Queen"
+        BUNDLE_ID               "com.seqqueen.fx"
+        PLUGIN_MANUFACTURER_CODE Sqqn
+        PLUGIN_CODE             Sqfx
+        FORMATS                 VST3 AU
+        PRODUCT_NAME            "Seq Queen FX"
+        DESCRIPTION             "Six punch-in FX, played from pads or MIDI notes"
+        IS_SYNTH                FALSE
+        NEEDS_MIDI_INPUT        TRUE
+        NEEDS_MIDI_OUTPUT       FALSE
+        IS_MIDI_EFFECT          FALSE
+        EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+        COPY_PLUGIN_AFTER_BUILD TRUE
+        VST3_CATEGORIES         "Fx"
+        AU_MAIN_TYPE            "kAudioUnitType_MusicEffect"
+    )
+    target_sources(SeqQueenFX PRIVATE
+        ${OPXY_FX_DEVICE_SOURCES}
+        Source/Devices/FxPlugin/FxEntry.cpp
+        Source/Plugin/SeqQueenLookAndFeel.cpp)
+    opxy_finish_device(SeqQueenFX)
+
+    # Live won't load third-party MIDI effects, so this is an instrument that
+    # outputs MIDI (and silence). Other tracks pick it as their "MIDI From".
+    juce_add_plugin(SeqQueenNotes
+        COMPANY_NAME            "Seq Queen"
+        BUNDLE_ID               "com.seqqueen.notes"
+        PLUGIN_MANUFACTURER_CODE Sqqn
+        PLUGIN_CODE             Sqnt
+        FORMATS                 VST3 AU
+        PRODUCT_NAME            "Seq Queen Notes"
+        DESCRIPTION             "OP-XY style note punches between a clip and an instrument"
+        IS_SYNTH                TRUE
+        NEEDS_MIDI_INPUT        TRUE
+        NEEDS_MIDI_OUTPUT       TRUE
+        IS_MIDI_EFFECT          FALSE
+        EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+        COPY_PLUGIN_AFTER_BUILD TRUE
+        VST3_CATEGORIES         "Instrument"
+        AU_MAIN_TYPE            "kAudioUnitType_MusicDevice"
+    )
+    target_sources(SeqQueenNotes PRIVATE
+        ${OPXY_NOTES_DEVICE_SOURCES}
+        Source/Devices/NotesPlugin/NotesEntry.cpp
+        Source/Plugin/SeqQueenLookAndFeel.cpp)
+    opxy_finish_device(SeqQueenNotes)
+
     # Headless editor renderer: writes PNGs of the UI, no host or window needed.
     juce_add_console_app(seqqueen_snapshot PRODUCT_NAME "seqqueen-snapshot")
     juce_generate_juce_header(seqqueen_snapshot)
     target_sources(seqqueen_snapshot PRIVATE
         tools/snapshot.cpp
+        ${OPXY_FX_DEVICE_SOURCES}
+        ${OPXY_NOTES_DEVICE_SOURCES}
         Source/Plugin/PluginProcessor.cpp
         Source/Plugin/PluginEditor.cpp
         Source/Plugin/ParamIDs.cpp

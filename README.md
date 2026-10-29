@@ -1,19 +1,25 @@
 # Seq Queen
 
-An OP-XY-inspired **instrument plugin** for not-quite-commercial, definitely-personal use:
-an 8-track p-lock step sequencer with momentary **punch-in FX**.
+OP-XY-style **punch-in effects** for Ableton, for not-quite-commercial,
+definitely-personal use. Ableton does the sequencing; Seq Queen does the punches.
+Two devices:
 
-Built with C++17 and JUCE 8. It is an *instrument*, not an audio effect: drop it on a
-MIDI track in Ableton and it makes its own sound, the sequencer runs from the host
-transport, and the punch-in FX are performed live (pads, MIDI notes, or automation).
+* **Seq Queen FX** (audio effect). Six momentary effects (tape stop, delay throw,
+  filter, stutter, reverb, bitcrush) on any track or bus. Hold a pad, or play its
+  note (C1–F1) from a MIDI clip; harder notes punch harder.
+* **Seq Queen Notes** (MIDI device). Your clip plays through it on its way to your
+  Drum Rack or synth. Hold one of twelve trigger notes (C-2–B-2) to mute, roll,
+  fill, add kick/snare or hats, shift octaves, chop, randomise, thin out or echo
+  what comes out, the way the OP-XY's punch-in keys do.
+
+Built with C++17 and JUCE 8. The original all-in-one instrument (8-track p-lock
+sequencer + synth + the same FX) still builds as **Seq Queen**, but the two devices
+above are the direction now.
 
 ![status](https://img.shields.io/badge/core-tested%20%26%20rendering-brightgreen)
 ![status](https://img.shields.io/badge/plugin-builds%20%2B%20auval%20%2B%20pluginval-brightgreen)
 
 > **Read this first if you are the next agent:** [`HANDOFF.md`](HANDOFF.md).
-> The engine is finished and unit tested. The JUCE wrapper has never been through a
-> compiler (no JUCE toolchain was available where it was written) — building it and
-> fixing whatever surfaces is step one.
 
 ---
 
@@ -111,6 +117,40 @@ ctest --preset core          # or ./build/core/opxy_core_tests
 
 ## In Ableton (Live 11/12)
 
+Rescan plug-ins (Settings → Plug-Ins) after building. Use the **VST3** versions:
+Live routes MIDI to and from VST3 plug-ins, which both devices rely on.
+
+### Seq Queen FX
+
+1. Drop **Seq Queen FX** (Audio Effects) on a track or bus, e.g. your drum bus.
+2. Hold its pads while Live plays. That's it for live use.
+3. To sequence punches: make a new MIDI track, set its **MIDI To** to the FX's
+   track and then **Seq Queen FX** in the second chooser. Draw notes **C1–F1** in
+   a clip on that track: C1 tape stop, C#1 delay, D1 filter, D#1 stutter,
+   E1 reverb, F1 bitcrush. Note length = how long it punches, velocity = how hard.
+
+### Seq Queen Notes
+
+1. Put **Seq Queen Notes** (Instruments) on a MIDI track and put your clip there.
+2. On the track with your Drum Rack or synth: **MIDI From** → the Notes track →
+   **Seq Queen Notes**, and **Monitor** → **In**.
+3. Hold the trigger notes in the same clip (or play them, or hold the pads):
+
+| Note | Punch | | Note | Punch |
+|---|---|---|---|---|
+| C-2 | Mute | | F#-2 | Octave up |
+| C#-2 | Repeat (1/8, 1/16 or 1/32) | | G-2 | Octave down |
+| D-2 | Fill empty 16ths with the last hit | | G#-2 | Shorten |
+| D#-2 | Fill empty 8ths | | A-2 | Random (swaps in recent notes) |
+| E-2 | Add kick + snare | | A#-2 | Skip every other note |
+| F-2 | Add 16th hats | | B-2 | Echo an 8th later |
+
+The green pads (repeat, fills, added drums) follow Live's 16th grid, so they only
+play while the transport runs. Kick, snare and hat notes default to the Drum Rack
+pads C1, D1 and F#1 and can be changed in the device.
+
+### Seq Queen (the original instrument)
+
 1. Rescan plug-ins (Preferences → Plug-Ins), or restart Live.
 2. Drop **Seq Queen** from *Instruments* onto a MIDI track.
 3. Press play in Live — the sequencer follows the host transport and tempo.
@@ -148,17 +188,20 @@ Source/
     FxChain.*          the six effects in one bus
     Engine.*           rendering, FX routing, per-track buffers, master
     PatternState.*     step-grid serialisation for save/load
-  Plugin/          JUCE wrapper (processor, editor, components)
-tests/CoreTests.cpp    28 tests, no JUCE required
+    FxBus.*            the six FX as a standalone insert (Seq Queen FX)
+    NoteFx.*           the twelve note punches (Seq Queen Notes)
+  Devices/         the two devices: FxPlugin/, NotesPlugin/, Shared/ (pads, knobs)
+  Plugin/          the original instrument's JUCE wrapper (also owns Theme + LookAndFeel)
+tests/CoreTests.cpp    40 tests, no JUCE required
+tools/snapshot.cpp     renders every editor to PNG without a host
 tools/render_demo.cpp  offline demo renderer
 docs/                  architecture, p-lock semantics, how to add an FX
 ```
 
 ## Status / next steps
 
-See [`HANDOFF.md`](HANDOFF.md) for the prioritised list. Short version:
-compile the JUCE target, fix the fallout, then add pattern chaining, a per-step
-pitch/velocity piano roll view, and sample playback per track.
+See [`HANDOFF.md`](HANDOFF.md) for the prioritised list. Short version: try both
+devices in Live, then tune how each punch sounds and feels.
 
 ## Licence
 
