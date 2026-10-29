@@ -302,7 +302,7 @@ void PLockPanelComponent::paint (juce::Graphics& g)
     ui::panelBox (g, getLocalBounds());
 
     const auto headerArea = getLocalBounds().reduced (14, 8).removeFromTop (14);
-    ui::caption (g, headerArea, "03  ·  step edit", ui::boneDim);
+    ui::caption (g, headerArea, juce::CharPointer_UTF8 ("03  ·  step edit"), ui::boneDim);
     title.setBounds (headerArea.withTrimmedLeft (140));
 
     g.setColour (ui::hairline);

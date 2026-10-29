@@ -28,8 +28,8 @@ option(OPXY_BUILD_DEMO   "Build the offline demo renderer" ON)
 option(OPXY_FETCH_JUCE   "Download JUCE via FetchContent if no local copy is supplied" ON)
 option(OPXY_UNIVERSAL_BUILD "Build a universal macOS binary (arm64 + x86_64)" OFF)
 
-set(OPXY_JUCE_PATH "" CACHE PATH "Path to a local JUCE 7 checkout (optional)")
-set(OPXY_JUCE_TAG "7.0.12" CACHE STRING "JUCE tag to fetch when using FetchContent")
+set(OPXY_JUCE_PATH "" CACHE PATH "Path to a local JUCE 8 checkout (optional)")
+set(OPXY_JUCE_TAG "8.0.14" CACHE STRING "JUCE tag to fetch when using FetchContent")
 
 if (APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum macOS version" FORCE)
@@ -163,6 +163,37 @@ if (OPXY_BUILD_PLUGIN)
         JUCE_DISPLAY_SPLASH_SCREEN=0
         JUCE_REPORT_APP_USAGE=0
         JUCE_STRICT_REFCOUNTEDPOINTER=1
+    )
+
+    # Headless editor renderer: writes PNGs of the UI, no host or window needed.
+    juce_add_console_app(seqqueen_snapshot PRODUCT_NAME "seqqueen-snapshot")
+    juce_generate_juce_header(seqqueen_snapshot)
+    target_sources(seqqueen_snapshot PRIVATE
+        tools/snapshot.cpp
+        Source/Plugin/PluginProcessor.cpp
+        Source/Plugin/PluginEditor.cpp
+        Source/Plugin/ParamIDs.cpp
+        Source/Plugin/SeqQueenLookAndFeel.cpp
+        Source/Plugin/Components/StepGrid.cpp
+        Source/Plugin/Components/PunchPads.cpp
+        Source/Plugin/Components/PLockPanel.cpp
+        Source/Plugin/Components/TrackMixer.cpp
+    )
+    target_compile_definitions(seqqueen_snapshot PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_MODAL_LOOPS_PERMITTED=1
+        JucePlugin_Name="Seq Queen"
+        JucePlugin_IsSynth=1
+    )
+    target_link_libraries(seqqueen_snapshot
+        PRIVATE
+            opxy_core
+            juce::juce_audio_utils
+            juce::juce_dsp
+            juce::juce_gui_extra
+        PUBLIC
+            juce::juce_recommended_config_flags
     )
 endif()
 

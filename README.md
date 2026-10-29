@@ -3,12 +3,12 @@
 An OP-XY-inspired **instrument plugin** for not-quite-commercial, definitely-personal use:
 an 8-track p-lock step sequencer with momentary **punch-in FX**.
 
-Built with C++17 and JUCE 7. It is an *instrument*, not an audio effect: drop it on a
+Built with C++17 and JUCE 8. It is an *instrument*, not an audio effect: drop it on a
 MIDI track in Ableton and it makes its own sound, the sequencer runs from the host
 transport, and the punch-in FX are performed live (pads, MIDI notes, or automation).
 
 ![status](https://img.shields.io/badge/core-tested%20%26%20rendering-brightgreen)
-![status](https://img.shields.io/badge/JUCE%20layer-not%20yet%20compiled-orange)
+![status](https://img.shields.io/badge/plugin-builds%20%2B%20auval%20%2B%20pluginval-brightgreen)
 
 > **Read this first if you are the next agent:** [`HANDOFF.md`](HANDOFF.md).
 > The engine is finished and unit tested. The JUCE wrapper has never been through a
@@ -84,7 +84,7 @@ Ninja is optional (`brew install ninja`, then `cmake --preset mac-release -G Nin
 and just makes the build faster.
 
 ```bash
-cmake --preset mac-release        # fetches JUCE 7.0.12 on first run (~1 min)
+cmake --preset mac-release        # fetches JUCE 8.0.14 on first run (~1 min)
 cmake --build --preset mac-release -j8
 ```
 

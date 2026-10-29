@@ -11,20 +11,20 @@ constexpr int kGap = 8;
 constexpr int kGridHeight = 226;
 constexpr int kPunchHeight = 104;
 constexpr int kPLockHeight = 140;
-constexpr int kMixerHeight = 8 * 22 + 40;
+constexpr int kMixerHeight = 8 * 22 + 52;
 constexpr int kFooterHeight = 14;
 
 constexpr int kEngineWidth = 84;
 constexpr int kScaleWidth = 78;
 } // namespace
 
-SeqQueenAudioProcessorEditor::SeqQueenAudioProcessorEditor (SeqQueenAudioProcessor& processor)
-    : juce::AudioProcessorEditor (&processor),
-      proc (processor),
-      stepGrid (processor),
-      punchBar (processor),
-      pLockPanel (processor),
-      trackMixer (processor)
+SeqQueenAudioProcessorEditor::SeqQueenAudioProcessorEditor (SeqQueenAudioProcessor& p)
+    : juce::AudioProcessorEditor (&p),
+      proc (p),
+      stepGrid (p),
+      punchBar (p),
+      pLockPanel (p),
+      trackMixer (p)
 {
     setOpaque (true);
     setResizable (true, true);
@@ -209,7 +209,9 @@ void SeqQueenAudioProcessorEditor::paint (juce::Graphics& g)
     // ---- footer strip ------------------------------------------------------
     const auto footer = juce::Rectangle<int> (kMargin, getHeight() - kMargin - kFooterHeight,
                                               getWidth() - 2 * kMargin, kFooterHeight);
-    opxy::ui::text (g, footer, "SEQ QUEEN", opxy::ui::monoFont (7.0f, true), opxy::ui::textFaint);
+    auto footerText = footer;
+    opxy::ui::text (g, footerText.removeFromLeft (60), "SEQ QUEEN", opxy::ui::monoFont (7.0f, true),
+                    opxy::ui::textFaint);
 
     juce::String serial;
     serial << "SQQN-" << juce::String (proc.getFxNoteBase()).paddedLeft ('0', 2)
@@ -217,11 +219,8 @@ void SeqQueenAudioProcessorEditor::paint (juce::Graphics& g)
                                                  : juce::String ("-- KHZ"))
            << " / " << juce::String (opxy::kMaxVoices) << " VOICES";
 
-    opxy::ui::text (g, footer, serial, opxy::ui::monoFont (7.0f), opxy::ui::textFaint,
+    opxy::ui::text (g, footerText, serial, opxy::ui::monoFont (7.0f), opxy::ui::textFaint,
                     juce::Justification::centredLeft);
-    // (offset the serial to sit after the wordmark)
-    g.setColour (opxy::ui::voidColour);
-    g.fillRect (footer.withTrimmedLeft (70).withWidth (6));
 
     // Barcode: the poster's serial strip, used as a visual full stop.
     const int barsX = footer.getRight() - 74;

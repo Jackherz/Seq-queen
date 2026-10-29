@@ -7,7 +7,7 @@ namespace
 {
 // Column layout, shared by resized() and paint() through the caption widths.
 constexpr int kRowHeight = 22;
-constexpr int kHeaderHeight = 16;
+constexpr int kHeaderHeight = 28;   // section title + column captions
 constexpr int kLabelWidth = 74;
 constexpr int kEngineWidth = 84;
 constexpr int kKnobWidth = 40;
@@ -147,9 +147,9 @@ void TrackMixerComponent::paint (juce::Graphics& g)
 
     auto header = getLocalBounds().reduced (14, 8);
     ui::sectionHeader (g, header.removeFromTop (14), "04", "voices",
-                       "8 tracks · polyrhythm lengths · brains");
+                       juce::CharPointer_UTF8 ("8 tracks · polyrhythm lengths · brains"));
 
-    header.removeFromTop (kHeaderHeight - 12);
+    header = header.withTrimmedTop (kHeaderHeight - 22).withHeight (12);
     header.removeFromLeft (kLabelWidth - 22);
     ui::caption (g, header.removeFromLeft (20), "len", ui::textFaint);
     header.removeFromLeft (kEngineWidth);
@@ -165,12 +165,12 @@ void TrackMixerComponent::paint (juce::Graphics& g)
     ui::caption (g, header.removeFromLeft (kToggleWidth), "mu", ui::textFaint);
 
     // Row separators + a mute/engine state hint on the left gutter.
-    auto rows = getLocalBounds().reduced (14, 8);
-    rows.removeFromTop (kHeaderHeight + 6);
+    auto rowArea = getLocalBounds().reduced (14, 8);
+    rowArea.removeFromTop (kHeaderHeight + 6);
 
     for (int t = 0; t < kMaxTracks; ++t)
     {
-        auto line = rows.removeFromTop (kRowHeight);
+        auto line = rowArea.removeFromTop (kRowHeight);
         g.setColour (ui::hairline.withAlpha (0.6f));
         g.drawHorizontalLine (line.getBottom() - 1, static_cast<float> (line.getX()),
                               static_cast<float> (line.getRight()));

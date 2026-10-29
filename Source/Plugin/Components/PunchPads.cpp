@@ -175,7 +175,7 @@ void PunchBarComponent::paint (juce::Graphics& g)
 {
     ui::panelBox (g, getLocalBounds());
     ui::sectionHeader (g, getLocalBounds().reduced (14, 8), "02", "punch-in fx",
-                       "hold to engage · velocity -> depth");
+                       juce::CharPointer_UTF8 ("hold to engage · velocity -> depth"));
 
     // Bus rail: the patch-cable destination along the bottom of the section.
     const float railY = static_cast<float> (getBottom() - 8);

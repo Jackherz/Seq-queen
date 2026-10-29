@@ -62,15 +62,15 @@ inline juce::Colour fxAccent (int fxIndex)
 // -------------------------------------------------------------------- fonts --
 inline juce::Font monoFont (float height, bool bold = false)
 {
-    juce::Font font (juce::Font::getDefaultMonospacedFontName(), height,
-                     bold ? juce::Font::bold : juce::Font::plain);
+    juce::Font font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), height,
+                                        bold ? juce::Font::bold : juce::Font::plain));
     return font.withExtraKerningFactor (0.06f);
 }
 
 inline juce::Font sansFont (float height, bool bold = false)
 {
-    juce::Font font (juce::Font::getDefaultSansSerifFontName(), height,
-                     bold ? juce::Font::bold : juce::Font::plain);
+    juce::Font font (juce::FontOptions (juce::Font::getDefaultSansSerifFontName(), height,
+                                        bold ? juce::Font::bold : juce::Font::plain));
     return font.withExtraKerningFactor (0.05f);
 }
 
@@ -115,8 +115,8 @@ inline void panelBox (juce::Graphics& g, juce::Rectangle<int> area,
                                     { bounds.getX(), bounds.getBottom() },
                                     { bounds.getRight(), bounds.getBottom() } })
         {
-            const float dx = (corner.x == bounds.getX()) ? 1.0f : -1.0f;
-            const float dy = (corner.y == bounds.getY()) ? 1.0f : -1.0f;
+            const float dx = (corner.x < bounds.getCentreX()) ? 1.0f : -1.0f;
+            const float dy = (corner.y < bounds.getCentreY()) ? 1.0f : -1.0f;
             g.drawLine (corner.x, corner.y, corner.x + dx * length, corner.y, 1.0f);
             g.drawLine (corner.x, corner.y, corner.x, corner.y + dy * length, 1.0f);
         }

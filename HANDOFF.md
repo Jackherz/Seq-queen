@@ -1,26 +1,37 @@
 # Handoff — read this before touching anything
 
 You are picking up **Seq Queen**, an OP-XY-inspired instrument plugin: an 8-track
-p-lock step sequencer plus six momentary punch-in FX, written in C++17 + JUCE 7.
+p-lock step sequencer plus six momentary punch-in FX, written in C++17 + JUCE 8.
 
-The previous agent (that's me) could not compile the JUCE layer: the sandbox had no
-JUCE, no X11/ALSA/freetype headers, and no macOS toolchain. So the architecture was
-built in two halves:
+The architecture is in two halves:
 
-* **`Source/Core/` — JUCE-free engine. Written *and verified*.** 28 unit tests,
-  ~82k assertions, all green, and it renders the audio in `demo/opxy_demo.wav`.
-* **`Source/Plugin/` — JUCE wrapper. Written, never linked.** Every translation
-  unit now compiles clean with `g++ -fsyntax-only` against the real JUCE 7.0.12
-  headers (see "Syntax check" below), so typos, wrong signatures and missing
-  members are already gone. What is *not* verified is anything that needs a full
-  build: the module implementations, the plugin wrappers, resource/`JuceHeader`
-  generation, and the AU/VST3 bundles. Expect link-level surprises, not
-  "`ui::` has not been declared".
+* **`Source/Core/` — JUCE-free engine.** 28 unit tests, ~82k assertions, all
+  green, and it renders the audio in `demo/opxy_demo.wav`.
+* **`Source/Plugin/` — JUCE wrapper.** Builds and links on macOS (Apple clang 17,
+  SDK 26.2, arm64) into VST3, AU and Standalone with zero warnings from the
+  plugin sources.
+
+### Status as of 2026-10-29 (first real macOS build)
+
+* **Moved from JUCE 7.0.12 to JUCE 8.0.14.** 7.0.12 cannot build against the
+  macOS 15+ SDK (`CGWindowListCreateImage` was removed; `juceaide` fails at
+  configure time) and no JUCE 7 release fixes it. The only source changes needed
+  were the `juce::Font` constructors in `Theme.h` (now `FontOptions`).
+  `PositionInfo` still returns `juce::Optional` in JUCE 8, so the playhead code is
+  unchanged.
+* **Validated:** `auval -v aumu Sqxy Sqqn` passes; pluginval strictness 8 passes
+  on the VST3 (editor open, state restore, parameter fuzzing, bus layouts).
+* **UI checked by eye** via the new headless renderer (`seqqueen_snapshot`, below).
+  Fixed on the way: `Â·` mojibake in three captions (UTF-8 literals passed as
+  `const char*`), the mixer's column captions drawn across rows 4–5 instead of the
+  header, track/engine labels overlapping in the grid, FX lane names truncated
+  ("STUTTE"), and the footer wordmark overlapping the serial.
+* **Not yet done:** a smoke test in Ableton (section 4). That is the next step.
 
 Your job, in order:
 
-1. **Build it.** (See "Build" below.) Fix compile errors until it links.
-2. **Run the tests, keep them green.** Then smoke-test in a host.
+1. **Smoke-test in Ableton** (section 4).
+2. **Keep the tests green.**
 3. **Work down the "Next tasks" list** at the end of this document.
 
 ---
@@ -30,7 +41,7 @@ Your job, in order:
 macOS (the target platform — this is going into Ableton on a Mac):
 
 ```bash
-cmake --preset mac-release            # first run fetches JUCE 7.0.12
+cmake --preset mac-release            # first run fetches JUCE 8.0.14
 cmake --build --preset mac-release -j8
 ```
 
@@ -45,6 +56,17 @@ cmake --build --preset core
 ctest --preset core                      # 28 tests
 ./build/core/opxy_demo demo/opxy_demo.wav
 ```
+
+### Looking at the UI without a host
+
+```bash
+cmake --build --preset mac-release --target seqqueen_snapshot
+./build/mac-release/seqqueen_snapshot_artefacts/Release/seqqueen_snapshot build/snap
+```
+
+Runs the starter groove for two seconds, then writes `main.png` and `lanes.png`
+at 2x, plus the output peak and processing/draw cost. No window or screen
+recording permission needed — use it after every UI change.
 
 ### Syntax check (no full build needed)
 
@@ -62,17 +84,12 @@ substitute for building.
 Useful switches: `-DOPXY_JUCE_PATH=/path/to/JUCE` (skip the download),
 `-DOPXY_BUILD_PLUGIN=OFF`, `-DOPXY_UNIVERSAL_BUILD=ON` (arm64 + x86_64).
 
-### Expect these first-build issues
+### Build notes
 
-* **`JuceHeader.h` not found** → make sure `juce_generate_juce_header(SeqQueen)` is
-  present in `CMakeLists.txt` (it is) and that the plugin sources are in
-  `target_sources` (they are).
-* **Parameter ctor deprecation warnings** → `AudioParameterFloat`/`AudioParameterChoice`
-  are constructed with `String` IDs; JUCE 7 hints about `ParameterID` version hints.
-  Warnings are fine, errors are not.
-* **`getPosition()` / `juce::Optional`** → JUCE 7.0.12 returns
-  `juce::Optional<AudioPlayHead::PositionInfo>` (JUCE 8 returns `std::optional`). The
-  code is written for 7.0.12 and uses `.hasValue()` / `.orFallback()`.
+* **Don't go back to JUCE 7** on a current Mac: see the status note above.
+* **`-Wfloat-equal` in `ScalarUtils.h`** (`Ramp::isSmoothing`) is the one remaining
+  warning. The exact compare is intentional: the ramp snaps exactly to its target
+  and a core test relies on it.
 * **`PLUGIN_CODE Sqxy` may already be taken** by another plugin on the machine. If AU
   validation complains or the two collide, change `PLUGIN_CODE` / `PLUGIN_MANUFACTURER_CODE`
   and bump the AU `PLUGIN_CODE`.
@@ -103,7 +120,7 @@ Source/Core/                     ← JUCE-FREE. Never include JUCE here.
                                  sum → master FX → soft clip → output
   PatternState.h/.cpp            "opxy-steps v1" text serialisation of the step grid
 
-Source/Plugin/                   ← JUCE layer (unverified)
+Source/Plugin/                   ← JUCE layer
   ParamIDs.h/.cpp                every automatable parameter + the APVTS layout
   Theme.h                        colours, fonts, small styling helpers
   PluginProcessor.h/.cpp         engine ownership, param push, transport, MIDI in/out,
@@ -191,7 +208,7 @@ In Ableton:
 
 | # | Task | Notes |
 |---|---|---|
-| 1 | Build + fix the JUCE layer | non-negotiable first step |
+| 1 | Ableton smoke test | the build, auval and pluginval pass; nobody has played it in Live yet (section 4) |
 | 2 | Real-instrument pass | audition every engine + FX, tune default levels and FX macros so it sounds good out of the box (`PluginProcessor` ctor + `defaultAmounts/ParamA/ParamB` in `ParamIDs.cpp`) |
 | 3 | Punch-lane UI polish | the grid's `FX LANES` mode toggles 0/1 values only. Add: drag to set an amount (vertical drag), per-lane length, a lane clear/randomise button, and a "record pad presses into the lane" mode (arm, hold pads while the transport runs, write the gesture into the lane at the current step) |
 | 4 | Per-step pitch editing UI | the p-lock panel edits the selected step; a roll view (drag note in a mini piano-roll per track) would make it much faster to use |
@@ -207,10 +224,12 @@ In Ableton:
 
 ## 6. Known rough edges (honest list)
 
-* **The JUCE layer is unproven.** Most likely failure points, in order:
-  `PluginEditor.cpp` layout maths (rectangles are hand-computed), the
-  `AudioProcessorValueTreeState::*Attachment` constructions (signatures verified
-  against JUCE 7.0.12 sources but never compiled), and `paint()` methods.
+* **Mixer strips are tiny.** The seven per-track controls in the VOICES panel are
+  40 px wide linear sliders and read as tick marks; they work, but a later UI pass
+  should give them more room or turn them into the tick-ring dials.
+* **`render_demo.cpp` calls `barTime (13.5)`** but `barTime` takes an `int`, so the
+  lead filter sweep in the demo ends at bar 13, not 13.5. Left as is so the
+  committed WAV still matches; change the signature to `double` if you re-render.
 * **Editor is tall** (1180 x 810 default, 1020 x 740 minimum). Laptops in Live's
   lower zone may need the standalone window or a scrollable host.
 * **No undo.** Step edits write straight into `Pattern` atomics. If you add undo,

@@ -11,7 +11,6 @@ namespace
 constexpr int kLabelWidth = 92;
 constexpr int kHeaderHeight = 16;
 constexpr float kPadGap = 2.0f;
-constexpr float kPadRadius = 1.5f;
 }
 
 StepGridComponent::StepGridComponent (SeqQueenAudioProcessor& processor)
@@ -294,12 +293,13 @@ void StepGridComponent::paintTracks (juce::Graphics& g)
         }
 
         // --- label -----------------------------------------------------------
-        const auto labelArea = row.withTrimmedLeft (14).withWidth (kLabelWidth - 46);
-        ui::text (g, labelArea.withTrimmedTop (3),
+        auto labelArea = row.withTrimmedLeft (14).withWidth (kLabelWidth - 46)
+                            .withSizeKeepingCentre (kLabelWidth - 46, 22);
+        ui::text (g, labelArea.removeFromTop (12),
                   "TRACK " + juce::String (track + 1),
                   ui::monoFont (8.5f, true),
                   muted ? ui::textFaint : (hasSteps ? ui::boneDim : ui::textFaint));
-        ui::text (g, labelArea.withTrimmedTop (13),
+        ui::text (g, labelArea,
                   static_cast<EngineType> (trackData.engine.load()) < EngineType::Count
                       ? juce::String (engineTypeName (static_cast<EngineType> (trackData.engine.load()))).toUpperCase()
                       : juce::String ("—"),
@@ -406,14 +406,14 @@ void StepGridComponent::paintFxLanes (juce::Graphics& g)
         g.fillRect (juce::Rectangle<float> (static_cast<float> (row.getX() + 14),
                                             static_cast<float> (row.getCentreY()) - 1.5f, 3.0f, 3.0f));
 
-        ui::text (g, row.withTrimmedLeft (24).withWidth (kLabelWidth - 58),
+        auto labelArea = row.withTrimmedLeft (24).withWidth (kLabelWidth - 28)
+                            .withSizeKeepingCentre (kLabelWidth - 28, 22);
+        ui::text (g, labelArea.removeFromTop (12),
                   juce::String (fxTypeName (static_cast<FxType> (f))).toUpperCase(),
                   ui::monoFont (8.5f, true),
                   enabled ? ui::boneDim : ui::textFaint);
-
-        ui::text (g, row.withTrimmedLeft (kLabelWidth - 34).withWidth (28),
-                  enabled ? "SEQ" : "OFF", ui::monoFont (6.8f),
-                  enabled ? colour : ui::textFaint, juce::Justification::centredRight);
+        ui::text (g, labelArea, enabled ? "SEQ" : "OFF", ui::monoFont (6.8f),
+                  enabled ? colour : ui::textFaint);
 
         for (int step = 0; step < visibleSteps; ++step)
         {
