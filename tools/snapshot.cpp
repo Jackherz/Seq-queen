@@ -1,16 +1,12 @@
-// seqqueen_snapshot: renders the editor to PNGs without a host or a window, so
-// UI changes can be checked from the command line (and on machines where a
-// screenshot needs a permission the terminal doesn't have).
+// seqqueen_snapshot: renders both devices' editors to PNGs without a host or a
+// window, so UI changes can be checked from the command line (and on machines
+// where a screenshot needs a permission the terminal doesn't have).
 //
 //   seqqueen_snapshot out-folder
 //
-// Runs the starter groove for two seconds so the playhead and meters have
-// something to show, then writes main.png (note tracks) and lanes.png (the
-// punch-FX lanes view), then fx.png and notes.png for the two devices with a
-// pad held in each. Also prints the output peak and rough processing and
-// drawing costs of the instrument.
+// Writes fx.png (Seq Queen FX, bitcrush pad held) and notes.png (Seq Queen
+// Notes, hats pad held), then prints rough processing and drawing costs.
 
-#include "../Source/Plugin/PluginProcessor.h"
 #include "../Source/Devices/FxPlugin/FxProcessor.h"
 #include "../Source/Devices/NotesPlugin/NotesProcessor.h"
 
@@ -21,6 +17,8 @@ namespace
 constexpr double kSampleRate = 48000.0;
 constexpr int kBlock = 512;
 
+/** Runs `seconds` of processing; the input is a 220 Hz sine so the FX has
+    something to chew on. Returns the output peak. */
 float play (juce::AudioProcessor& proc, double seconds)
 {
     float peak = 0.0f;
@@ -28,7 +26,10 @@ float play (juce::AudioProcessor& proc, double seconds)
     juce::MidiBuffer midi;
     for (int done = 0; done < static_cast<int> (seconds * kSampleRate); done += kBlock)
     {
-        buffer.clear();
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            for (int i = 0; i < kBlock; ++i)
+                buffer.setSample (ch, i, 0.5f * std::sin (juce::MathConstants<float>::twoPi * 220.0f
+                                                          * static_cast<float> (done + i) / static_cast<float> (kSampleRate)));
         midi.clear();
         proc.processBlock (buffer, midi);
         peak = juce::jmax (peak, buffer.getMagnitude (0, kBlock));
@@ -50,6 +51,23 @@ void settle (juce::AudioProcessor& proc)
     play (proc, 0.05);
     juce::MessageManager::getInstance()->runDispatchLoopUntil (120);
 }
+
+void report (const char* name, juce::AudioProcessor& proc, juce::Component& editor)
+{
+    const auto started = juce::Time::getMillisecondCounterHiRes();
+    const float peak = play (proc, 10.0);
+    const double ms = juce::Time::getMillisecondCounterHiRes() - started;
+
+    constexpr int frames = 60;
+    const auto drawStarted = juce::Time::getMillisecondCounterHiRes();
+    for (int i = 0; i < frames; ++i)
+        editor.createComponentSnapshot (editor.getLocalBounds(), true, 1.0f);
+    const double drawMs = (juce::Time::getMillisecondCounterHiRes() - drawStarted) / frames;
+
+    std::cout << name << ": processing " << juce::String (ms / 100.0, 2) << "% of one core, output peak "
+              << juce::String (juce::Decibels::gainToDecibels (peak), 1) << " dBFS, full-editor draw "
+              << juce::String (drawMs, 2) << " ms\n";
+}
 } // namespace
 
 int main (int argc, char* argv[])
@@ -64,64 +82,28 @@ int main (int argc, char* argv[])
     const auto outDir = juce::File::getCurrentWorkingDirectory().getChildFile (argv[1]);
     outDir.createDirectory();
 
-    SeqQueenAudioProcessor proc;
-    proc.setRateAndBufferSizeDetails (kSampleRate, kBlock);
-    proc.prepareToPlay (kSampleRate, kBlock);
-    play (proc, 2.0);
-
-    std::unique_ptr<juce::AudioProcessorEditor> editor (proc.createEditor());
-    editor->setVisible (true);
-    settle (proc);
-    snapshot (*editor, outDir.getChildFile ("main.png"));
-
-    for (auto* child : editor->getChildren())
-        if (auto* button = dynamic_cast<juce::TextButton*> (child);
-            button != nullptr && button->getButtonText().containsIgnoreCase ("lanes"))
-            button->triggerClick();
-    settle (proc);
-    snapshot (*editor, outDir.getChildFile ("lanes.png"));
-
-    {
-        const auto started = juce::Time::getMillisecondCounterHiRes();
-        const float peak = play (proc, 10.0);
-        const double ms = juce::Time::getMillisecondCounterHiRes() - started;
-        std::cout << "processing: " << juce::String (ms / 100.0, 2) << "% of one core, output peak "
-                  << juce::String (juce::Decibels::gainToDecibels (peak), 1) << " dBFS\n";
-    }
-
-    constexpr int frames = 60;
-    const auto started = juce::Time::getMillisecondCounterHiRes();
-    for (int i = 0; i < frames; ++i)
-        editor->createComponentSnapshot (editor->getLocalBounds(), true, 1.0f);
-    std::cout << "full-editor draw: "
-              << juce::String ((juce::Time::getMillisecondCounterHiRes() - started) / frames, 2)
-              << " ms per frame\n";
-
-    editor = nullptr;
-    proc.releaseResources();
-
-    // ---- Seq Queen FX: bitcrush held ------------------------------------------
     {
         SeqQueenFxProcessor fx;
         fx.setRateAndBufferSizeDetails (kSampleRate, kBlock);
         fx.prepareToPlay (kSampleRate, kBlock);
         fx.setPadHeld (static_cast<int> (opxy::FxType::Bitcrush), true);
-        std::unique_ptr<juce::AudioProcessorEditor> fxEditor (fx.createEditor());
-        fxEditor->setVisible (true);
+        std::unique_ptr<juce::AudioProcessorEditor> editor (fx.createEditor());
+        editor->setVisible (true);
         settle (fx);
-        snapshot (*fxEditor, outDir.getChildFile ("fx.png"));
+        snapshot (*editor, outDir.getChildFile ("fx.png"));
+        report ("fx", fx, *editor);
     }
 
-    // ---- Seq Queen Notes: hats held --------------------------------------------
     {
         SeqQueenNotesProcessor notes;
         notes.setRateAndBufferSizeDetails (kSampleRate, kBlock);
         notes.prepareToPlay (kSampleRate, kBlock);
         notes.setPadHeld (static_cast<int> (opxy::NoteFxType::Hats), true);
-        std::unique_ptr<juce::AudioProcessorEditor> notesEditor (notes.createEditor());
-        notesEditor->setVisible (true);
+        std::unique_ptr<juce::AudioProcessorEditor> editor (notes.createEditor());
+        editor->setVisible (true);
         settle (notes);
-        snapshot (*notesEditor, outDir.getChildFile ("notes.png"));
+        snapshot (*editor, outDir.getChildFile ("notes.png"));
+        report ("notes", notes, *editor);
     }
     return 0;
 }

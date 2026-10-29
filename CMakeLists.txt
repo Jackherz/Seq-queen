@@ -3,12 +3,15 @@ cmake_minimum_required(VERSION 3.22)
 project(SeqQueen VERSION 0.1.0 LANGUAGES C CXX)
 
 # -----------------------------------------------------------------------------
-#  Three separate things live in this repo:
+#  What lives in this repo:
 #
-#    opxy_core       the JUCE-free engine (sequencer, synth, punch-in FX)
-#    opxy_core_tests unit tests for the engine  -> no host, no GUI, no audio
-#    opxy_demo       offline demo renderer      -> writes a WAV you can listen to
-#    SeqQueen        the actual VST3/AU plugin  -> needs JUCE
+#    opxy_core          the JUCE-free engine (punch-in FX, note punches, and the
+#                       old instrument's sequencer + synth)
+#    opxy_core_tests    unit tests for the engine  -> no host, no GUI, no audio
+#    opxy_demo          offline demo renderer      -> writes a WAV you can listen to
+#    SeqQueenFX         audio effect: six punch-in FX         -> needs JUCE
+#    SeqQueenNotes      MIDI device: twelve note punches      -> needs JUCE
+#    seqqueen_snapshot  renders both editors to PNG           -> needs JUCE
 #
 #  The first three build with nothing but a C++17 compiler, which is why the
 #  engine can be tested on any machine before JUCE is in place.
@@ -22,7 +25,7 @@ if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
 
-option(OPXY_BUILD_PLUGIN "Build the VST3/AU/Standalone plugin (requires JUCE)" ON)
+option(OPXY_BUILD_PLUGIN "Build the VST3/AU devices (requires JUCE)" ON)
 option(OPXY_BUILD_TESTS  "Build the JUCE-free core tests" ON)
 option(OPXY_BUILD_DEMO   "Build the offline demo renderer" ON)
 option(OPXY_FETCH_JUCE   "Download JUCE via FetchContent if no local copy is supplied" ON)
@@ -90,7 +93,7 @@ if (OPXY_BUILD_DEMO)
 endif()
 
 # -----------------------------------------------------------------------------
-#  The plugin
+#  The devices
 # -----------------------------------------------------------------------------
 if (OPXY_BUILD_PLUGIN)
     if (OPXY_JUCE_PATH AND EXISTS "${OPXY_JUCE_PATH}/CMakeLists.txt")
@@ -113,59 +116,6 @@ if (OPXY_BUILD_PLUGIN)
             "JUCE not found. Pass -DOPXY_JUCE_PATH=/path/to/JUCE, drop a checkout in "
             "external/JUCE, or enable -DOPXY_FETCH_JUCE=ON.")
     endif()
-
-    juce_add_plugin(SeqQueen
-        COMPANY_NAME            "Seq Queen"
-        BUNDLE_ID               "com.seqqueen.seqqueen"
-        PLUGIN_MANUFACTURER_CODE Sqqn
-        PLUGIN_CODE             Sqxy
-        FORMATS                 VST3 AU Standalone
-        PRODUCT_NAME            "Seq Queen"
-        DESCRIPTION             "8-track p-lock step sequencer with momentary punch-in FX"
-        IS_SYNTH                TRUE
-        NEEDS_MIDI_INPUT        TRUE
-        NEEDS_MIDI_OUTPUT       TRUE
-        IS_MIDI_EFFECT          FALSE
-        EDITOR_WANTS_KEYBOARD_FOCUS FALSE
-        COPY_PLUGIN_AFTER_BUILD TRUE
-        VST3_CATEGORIES         "Instrument"
-        AU_MAIN_TYPE            "kAudioUnitType_MusicDevice"
-    )
-
-    juce_generate_juce_header(SeqQueen)
-
-    target_sources(SeqQueen PRIVATE
-        Source/Plugin/PluginProcessor.cpp
-        Source/Plugin/PluginEditor.cpp
-        Source/Plugin/ParamIDs.cpp
-        Source/Plugin/SeqQueenLookAndFeel.cpp
-        Source/Plugin/Components/StepGrid.cpp
-        Source/Plugin/Components/PunchPads.cpp
-        Source/Plugin/Components/PLockPanel.cpp
-        Source/Plugin/Components/TrackMixer.cpp
-    )
-
-    target_link_libraries(SeqQueen
-        PRIVATE
-            opxy_core
-            juce::juce_audio_utils
-            juce::juce_dsp
-            juce::juce_gui_basics
-            juce::juce_gui_extra
-        PUBLIC
-            juce::juce_recommended_config_flags
-            juce::juce_recommended_lto_flags
-            juce::juce_recommended_warning_flags
-    )
-
-    target_compile_definitions(SeqQueen PUBLIC
-        JUCE_WEB_BROWSER=0
-        JUCE_USE_CURL=0
-        JUCE_VST3_CAN_REPLACE_VST2=0
-        JUCE_DISPLAY_SPLASH_SCREEN=0
-        JUCE_REPORT_APP_USAGE=0
-        JUCE_STRICT_REFCOUNTEDPOINTER=1
-    )
 
     # -------------------------------------------------------------------------
     #  The two devices: punch FX as an audio effect, note punches as a MIDI
@@ -219,7 +169,7 @@ if (OPXY_BUILD_PLUGIN)
     target_sources(SeqQueenFX PRIVATE
         ${OPXY_FX_DEVICE_SOURCES}
         Source/Devices/FxPlugin/FxEntry.cpp
-        Source/Plugin/SeqQueenLookAndFeel.cpp)
+        Source/Devices/Shared/SeqQueenLookAndFeel.cpp)
     opxy_finish_device(SeqQueenFX)
 
     # Live won't load third-party MIDI effects, so this is an instrument that
@@ -244,7 +194,7 @@ if (OPXY_BUILD_PLUGIN)
     target_sources(SeqQueenNotes PRIVATE
         ${OPXY_NOTES_DEVICE_SOURCES}
         Source/Devices/NotesPlugin/NotesEntry.cpp
-        Source/Plugin/SeqQueenLookAndFeel.cpp)
+        Source/Devices/Shared/SeqQueenLookAndFeel.cpp)
     opxy_finish_device(SeqQueenNotes)
 
     # Headless editor renderer: writes PNGs of the UI, no host or window needed.
@@ -254,27 +204,18 @@ if (OPXY_BUILD_PLUGIN)
         tools/snapshot.cpp
         ${OPXY_FX_DEVICE_SOURCES}
         ${OPXY_NOTES_DEVICE_SOURCES}
-        Source/Plugin/PluginProcessor.cpp
-        Source/Plugin/PluginEditor.cpp
-        Source/Plugin/ParamIDs.cpp
-        Source/Plugin/SeqQueenLookAndFeel.cpp
-        Source/Plugin/Components/StepGrid.cpp
-        Source/Plugin/Components/PunchPads.cpp
-        Source/Plugin/Components/PLockPanel.cpp
-        Source/Plugin/Components/TrackMixer.cpp
+        Source/Devices/Shared/SeqQueenLookAndFeel.cpp
     )
     target_compile_definitions(seqqueen_snapshot PRIVATE
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_MODAL_LOOPS_PERMITTED=1
         JucePlugin_Name="Seq Queen"
-        JucePlugin_IsSynth=1
     )
     target_link_libraries(seqqueen_snapshot
         PRIVATE
             opxy_core
             juce::juce_audio_utils
-            juce::juce_dsp
             juce::juce_gui_extra
         PUBLIC
             juce::juce_recommended_config_flags

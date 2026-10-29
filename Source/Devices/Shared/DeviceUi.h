@@ -9,7 +9,7 @@
 // -----------------------------------------------------------------------------
 
 #include <JuceHeader.h>
-#include "../../Plugin/Theme.h"
+#include "Theme.h"
 
 #include <functional>
 

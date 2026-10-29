@@ -1,7 +1,7 @@
 # Adding a seventh punch-in FX
 
 The pattern is the same every time: one new core class, one line in `FxChain`, one
-parameter block, one pad. Everything else (routing, ramping, tails, UI) is generic.
+row of defaults, one column in the FX device. Everything else (routing, ramping, tails, UI) is generic.
 
 Worked example below: a **pitch-shift-ish "octave up" punch**, which is on the original
 want-list.
@@ -84,22 +84,24 @@ fx.push_back (std::make_unique<OctaveUpFx>());   // index must match FxType
 
 ## 4. Parameters
 
-`Source/Plugin/ParamIDs.cpp` already loops over `kMaxFx`; add the two default rows:
+`Source/Devices/FxPlugin/FxProcessor.cpp` already loops over `kMaxFx`; add a value to
+each default row:
 
 ```cpp
-static constexpr float defaultAmounts[kMaxFx] = { 1.0f, 0.9f, 1.0f, 1.0f, 0.85f, 0.9f, 1.0f };
-static constexpr float defaultParamA[kMaxFx]  = { 0.25f, 0.3f, 0.75f, 0.2f, 0.6f, 0.7f, 0.5f };
-static constexpr float defaultParamB[kMaxFx]  = { 0.2f, 0.45f, 0.5f, 0.66f, 0.4f, 0.5f, 0.5f };
+constexpr float kDefaultAmount[opxy::kMaxFx] = { 1.0f, 0.9f, 1.0f, 1.0f, 0.85f, 0.9f, 1.0f };
+constexpr float kDefaultA[opxy::kMaxFx]      = { 0.25f, 0.3f, 0.75f, 0.2f, 0.6f, 0.7f, 0.5f };
+constexpr float kDefaultB[opxy::kMaxFx]      = { 0.2f, 0.45f, 0.5f, 0.66f, 0.4f, 0.5f, 0.5f };
 ```
 
-The IDs (`fx_octave_amount`, `fx_octave_a`, …) are generated from `fxTypeId()`, so no
-other parameter work is needed.
+The IDs (`fx_octave_amount`, `fx_octave_a`, …) are generated from `fxTypeId()`, and
+the trigger notes extend by one (C1–F#1), so no other parameter work is needed.
 
 ## 5. UI
 
-Nothing to do: `PunchBarComponent` builds one pad per `kMaxFx`, `PunchPadComponent`
-reads the name from `fxTypeName()`, and the pad already shows its target bus and
-amount. If you want a nicer name than the id, change `fxTypeName()`.
+`Source/Devices/FxPlugin/FxEditor.cpp` builds one column per `kMaxFx`. Give the new
+effect a one-line description in `describe()` and name its two knobs, with units, in
+`macroFor()` — every control must say what it does. Then widen `kWidth` so seven
+columns still fit, and check it with the snapshot tool (`fx.png`).
 
 ## 6. Tests
 

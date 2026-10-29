@@ -1,12 +1,12 @@
 # Handoff — read this before touching anything
 
 You are picking up **Seq Queen**: OP-XY-style punch-in effects for Ableton, written
-in C++17 + JUCE 8. As of 2026-10-29 it is **two devices** that leave sequencing to
-the host (see decision 7):
+in C++17 + JUCE 8. It is **two devices** that leave sequencing to the host:
 
-* **Seq Queen FX** (`Source/Devices/FxPlugin`, core `FxBus`): the six punch-in
-  FX as an audio effect, triggered by pads, MIDI notes C1–F1 from a clip routed in
-  with *MIDI To*, or automation.
+* **Seq Queen FX** (`Source/Devices/FxPlugin`, core `FxBus`): six punch-in FX
+  (tape stop, delay throw, filter, stutter, reverb, bitcrush) as an audio effect.
+  Triggered by pads, MIDI notes C1–F1 from a clip routed in with *MIDI To*
+  (velocity sets depth), or each effect's *Punch* automation parameter.
 * **Seq Queen Notes** (`Source/Devices/NotesPlugin`, core `NoteFx`): twelve
   OP-XY-style note punches (mute, repeat, fill, half fill, kick+snare, hats, octave
   up/down, shorten, random, skip, echo). An instrument that outputs MIDI and
@@ -14,58 +14,34 @@ the host (see decision 7):
   takes it as *MIDI From*. Trigger notes are C-2–B-2 so they never collide with a
   Drum Rack.
 
-Both pass auval and pluginval strictness 8 (VST3 + AU). **Neither has been tried in
-Live yet.** The user found the all-in-one instrument confusing and overwhelming,
-which is why it was split; keep the devices simple and self-explaining (every pad
-says what it does, every knob has a real name and unit).
+### Status as of 2026-10-29
 
-The original instrument (**Seq Queen**, `Source/Plugin`) still builds and is
-described below; nothing new should go into it unless the user asks.
-
-The engine is in two halves:
-
-* **`Source/Core/` — JUCE-free engine.** 40 unit tests, ~82k assertions, all
-  green, and it renders the audio in `demo/opxy_demo.wav`.
-* **`Source/Plugin/` — JUCE wrapper.** Builds and links on macOS (Apple clang 17,
-  SDK 26.2, arm64) into VST3, AU and Standalone with zero warnings from the
-  plugin sources.
-
-### Status as of 2026-10-29 (first real macOS build)
-
-* **Moved from JUCE 7.0.12 to JUCE 8.0.14.** 7.0.12 cannot build against the
-  macOS 15+ SDK (`CGWindowListCreateImage` was removed; `juceaide` fails at
-  configure time) and no JUCE 7 release fixes it. The only source changes needed
-  were the `juce::Font` constructors in `Theme.h` (now `FontOptions`).
-  `PositionInfo` still returns `juce::Optional` in JUCE 8, so the playhead code is
-  unchanged.
-* **Validated:** `auval -v aumu Sqxy Sqqn` passes; pluginval strictness 8 passes
-  on the VST3 (editor open, state restore, parameter fuzzing, bus layouts).
-* **UI checked by eye** via the new headless renderer (`seqqueen_snapshot`, below).
-  Fixed on the way: `Â·` mojibake in three captions (UTF-8 literals passed as
-  `const char*`), the mixer's column captions drawn across rows 4–5 instead of the
-  header, track/engine labels overlapping in the grid, FX lane names truncated
-  ("STUTTE"), and the footer wordmark overlapping the serial.
-* **Not yet done:** a smoke test in Ableton (section 4). That is the next step.
-
-Your job, in order:
-
-1. **Smoke-test in Ableton** (section 4).
-2. **Keep the tests green.**
-3. **Work down the "Next tasks" list** at the end of this document.
+* Both devices build (VST3 + AU), pass `auval` and pluginval strictness 8, and
+  were checked by eye with the snapshot tool. 40 core tests green.
+* **Neither has been tried in Live yet.** That is the next step (section 4).
+* **History.** This started as one all-in-one instrument (8-track p-lock sequencer
+  + synth + the same FX, in `Source/Plugin`). The user found it confusing and
+  overwhelming and wants Live's own sequencer, so it was split into the two devices
+  and then removed (git history has it: last commit with it is `de90cc5`). Its
+  sequencer, synth and pattern code are still in `Source/Core` because the tests
+  and the demo renderer use them; no plugin does.
+* **Keep the devices simple and self-explaining.** Every pad says what it does and
+  which key triggers it; every knob has a real name and a value in real units.
+  That was the user's main complaint about the instrument.
+* **JUCE 8.0.14, not 7.** JUCE 7.0.12 cannot build against the macOS 15+ SDK
+  (`CGWindowListCreateImage` was removed; `juceaide` fails at configure time) and
+  no JUCE 7 release fixes it.
 
 ---
 
 ## 1. Build
-
-macOS (the target platform — this is going into Ableton on a Mac):
 
 ```bash
 cmake --preset mac-release            # first run fetches JUCE 8.0.14
 cmake --build --preset mac-release -j8
 ```
 
-The plugin copies itself into `~/Library/Audio/Plug-Ins/` automatically
-(`COPY_PLUGIN_AFTER_BUILD TRUE` in `CMakeLists.txt`).
+Both devices copy themselves into `~/Library/Audio/Plug-Ins/` (`COPY_PLUGIN_AFTER_BUILD`).
 
 Engine only — no JUCE needed, so this must always work, on any machine:
 
@@ -73,46 +49,35 @@ Engine only — no JUCE needed, so this must always work, on any machine:
 cmake --preset core
 cmake --build --preset core
 ctest --preset core                      # 40 tests
-./build/core/opxy_demo demo/opxy_demo.wav
 ```
 
 ### Looking at the UI without a host
 
 ```bash
-cmake --build --preset mac-release --target seqqueen_snapshot
 ./build/mac-release/seqqueen_snapshot_artefacts/Release/seqqueen_snapshot build/snap
 ```
 
-Runs the starter groove for two seconds, then writes `main.png` and `lanes.png`
-at 2x, plus the output peak and processing/draw cost. No window or screen
-recording permission needed — use it after every UI change.
+Writes `fx.png` and `notes.png` at 2x with a pad held in each, plus processing and
+draw cost. No window or screen-recording permission needed: use it after every UI
+change.
 
-### Syntax check (no full build needed)
-
-If you only want to know whether the plugin *sources* still make sense — fast,
-and it works without freetype/X11/ALSA:
+### Validation
 
 ```bash
-tools/check_plugin_syntax.sh /path/to/JUCE
+auval -v aumf Sqfx Sqqn          # Seq Queen FX (MusicEffect, so the AU takes MIDI)
+auval -v aumu Sqnt Sqqn          # Seq Queen Notes
+pluginval --strictness-level 8 --validate "~/Library/Audio/Plug-Ins/VST3/Seq Queen FX.vst3"
 ```
 
-It writes a throwaway `JuceHeader.h`, then `g++ -fsyntax-only`s every file in
-`Source/Plugin/`. All eight pass as of this handoff. It is a first pass, not a
-substitute for building.
-
-Useful switches: `-DOPXY_JUCE_PATH=/path/to/JUCE` (skip the download),
-`-DOPXY_BUILD_PLUGIN=OFF`, `-DOPXY_UNIVERSAL_BUILD=ON` (arm64 + x86_64).
+pluginval isn't in this repo; there is a copy at `~/Documents/AI/silt-plugin/pluginval/`.
 
 ### Build notes
 
-* **Don't go back to JUCE 7** on a current Mac: see the status note above.
 * **`-Wfloat-equal` in `ScalarUtils.h`** (`Ramp::isSmoothing`) is the one remaining
   warning. The exact compare is intentional: the ramp snaps exactly to its target
   and a core test relies on it.
-* **`PLUGIN_CODE Sqxy` may already be taken** by another plugin on the machine. If AU
-  validation complains or the two collide, change `PLUGIN_CODE` / `PLUGIN_MANUFACTURER_CODE`
-  and bump the AU `PLUGIN_CODE`.
-* **AU validation**: run `auval -v aumu Sqxy Sqqn` after building.
+* Useful switches: `-DOPXY_JUCE_PATH=/path/to/JUCE` (skip the download),
+  `-DOPXY_BUILD_PLUGIN=OFF`, `-DOPXY_UNIVERSAL_BUILD=ON` (arm64 + x86_64).
 
 ---
 
@@ -120,13 +85,9 @@ Useful switches: `-DOPXY_JUCE_PATH=/path/to/JUCE` (skip the download),
 
 ```
 Source/Core/                     ← JUCE-FREE. Never include JUCE here.
-  Types.h                        constants, Enums (EngineType, FxType, PlockParam), StepEvent
+  Types.h                        constants, enums (FxType, ...), TransportInfo
   ScalarUtils.h                  clamp/lerp/pan/Ramp (linear ramp with exact snapping)
-  Prng.h                         deterministic xorshift (tests + demo rely on it)
-  Pattern.h/.cpp                 Step (atomics), Track (voice settings + brains), Pattern
-  Sequencer.h/.cpp               the clock: host PPQ or free-run, swing, nudge, ratchet,
-                                 pending-hit queue so hits never quantise to block edges
-  SynthEngine.h/.cpp             24-voice pool, polyBLEP oscs, per-voice SVF, ADSR
+  Prng.h                         deterministic xorshift (tests rely on it)
   PunchInFx.h/.cpp               base class: momentary ramp, dry/wet capture, two mix styles
   TapeStopFx                     rate-slaved delay line, freeze + catch-up on release
   DelayThrowFx                   send-style feedback delay, tail rings after release
@@ -135,25 +96,25 @@ Source/Core/                     ← JUCE-FREE. Never include JUCE here.
   ReverbBurstFx                  4 comb + 2 allpass per channel, send-style, 1.2 s decay
   BitcrushFx                     bit-depth + sample-rate reduction, light drive
   FxChain.h/.cpp                 the six effects in one bus, processed in enum order
-  Engine.h/.cpp                  sequencer → voices → per-track buffers → focus FX →
-                                 sum → master FX → soft clip → output
-  PatternState.h/.cpp            "opxy-steps v1" text serialisation of the step grid
+  FxBus.h/.cpp                   FxChain as a standalone insert + velocity rule (FX device)
+  NoteFx.h/.cpp                  the twelve note punches on the host's grid (Notes device)
+  Engine, Sequencer, SynthEngine,
+  Pattern, PatternState          the old instrument; used by tests + demo only
 
-Source/Plugin/                   ← JUCE layer
-  ParamIDs.h/.cpp                every automatable parameter + the APVTS layout
-  Theme.h                        colours, fonts, small styling helpers
-  PluginProcessor.h/.cpp         engine ownership, param push, transport, MIDI in/out,
-                                 punch holds, save/load
-  PluginEditor.h/.cpp            layout + header controls
-  Components/StepGrid.*          8 x N grid: toggle, drag-paint, right-click select
-  Components/PunchPads.*         6 momentary pads (+ automation-driven glow)
-  Components/PLockPanel.*        selected step: note/vel/gate/ratchet/nudge + 6 p-locks
-  Components/TrackMixer.*        per-track engine, filter, brains, length, mute
+Source/Devices/
+  FxPlugin/FxProcessor.*         params, MIDI-note triggers, pads, mono/stereo
+  FxPlugin/FxEditor.*            six pads, four named knobs each, trigger-note knob
+  NotesPlugin/NotesProcessor.*   transport → NoteFx, MIDI in → NoteFx → MIDI out
+  NotesPlugin/NotesEditor.*      twelve pads in two rows, settings row
+  */…Entry.cpp                   createPluginFilter(), kept apart for the snapshot tool
+  Shared/DeviceUi.h              PunchPad, LabelledKnob, deviceHeader, Live note names
+  Shared/Theme.h                 colours, fonts, panel helpers
+  Shared/SeqQueenLookAndFeel.*   knob/combo/button drawing
 
 tests/CoreTests.cpp              the safety net. Add to it with every engine change.
+tools/snapshot.cpp               headless editor renderer
 tools/render_demo.cpp            offline renderer for demo/opxy_demo.wav
-docs/ARCHITECTURE.md             signal flow + threading model (read this one)
-docs/PLOCKS.md                   user-facing semantics of p-locks and brains
+docs/ARCHITECTURE.md             how the devices and the core fit together
 docs/ADDING_AN_FX.md             recipe for adding a seventh punch-in effect
 ```
 
@@ -162,68 +123,55 @@ docs/ADDING_AN_FX.md             recipe for adding a seventh punch-in effect
 ## 3. Design decisions that must not be undone casually
 
 1. **`Source/Core` stays JUCE-free.** It is the only reason the engine can be tested
-   without a toolchain. The plugin layer adapts JUCE to it, never the reverse.
-2. **UI/audio sharing uses `std::atomic` fields on `Pattern`/`FxSettings`, not locks.**
-   The message thread writes, the audio thread reads; a fumbled edit costs one block.
-   Do not introduce a mutex on the audio thread.
-3. **The sequencer schedules hits into a small fixed pending queue.** Ratchets, nudge
-   and swing all produce hits that can land after the current block. Do not "simplify"
-   this to fire-on-block-boundary; polyrhythms and ratchets break immediately.
-4. **Two FX mixing styles exist on purpose.** `replace` (dry/wet crossfade in the base
+   without a toolchain. The devices adapt JUCE to it, never the reverse.
+2. **UI/audio sharing uses atomics, not locks.** Pads write `std::atomic` flags,
+   parameters are read through APVTS raw pointers, `FxSettings` is all atomics. Do
+   not introduce a mutex on the audio thread.
+3. **Two FX mixing styles exist on purpose.** `replace` (dry/wet crossfade in the base
    class) for tape stop/filter/stutter/bitcrush; `send` (FX overrides `process()`)
    for delay throw and reverb burst, because their tails must stay audible after
    release. See `docs/ADDING_AN_FX.md`.
-5. **The engine soft-clips above 0.8** (`softClip()` in `Engine.cpp`) so eight loud
-   tracks can't hard-clip. It is deliberately transparent below the knee.
-6. **The instrument makes its own sound.** The original brief proposed an audio
-   effect; the user chose "instrument with internal voices", so `IS_SYNTH TRUE` and
-   there is no input bus.
-7. **The host sequences; Seq Queen punches (reversed 2026-10-29).** This used to
-   say "keep the sequencer and the FX in one plugin" so punches could be sequenced
-   on the same grid as the notes. The user found the all-in-one plugin confusing and
-   wants to use Live's own sequencer, so it is now two devices. Sequencing the
-   punches still works: they are notes in a Live clip, on Live's grid. The costs,
+4. **The host sequences; Seq Queen punches (decided 2026-10-29).** This used to be
+   "keep the sequencer and the FX in one plugin" so punches could be sequenced on
+   the same grid as the notes. The user preferred Live's own sequencer. Sequencing
+   the punches still works: they are notes in a Live clip, on Live's grid. Costs,
    accepted knowingly: routing (MIDI To / MIDI From) instead of one device, VST3 for
    reliable MIDI routing in Live, and no "target one internal track" option (put Seq
-   Queen FX on that track instead).
-8. **NoteFx guarantees a note-off for every note-on it sends**, including when a
+   Queen FX on that track instead). The user has Live Suite but chose VST3 over Max
+   for Live.
+5. **NoteFx guarantees a note-off for every note-on it sends**, including when a
    trigger is released mid-note (the off follows the note's *output* pitch) and
    when the pending queue fills up (note-ons give way first). The random-abuse test
-   `noteFxNeverLeavesANoteHangingUnderRandomAbuse` is the guard. Fills wait 2 ms
-   before committing so a real note landing just after the grid point wins.
-
-### Punch triggering: velocity and lanes
-
-* Pads and MIDI notes both punch; **MIDI velocity scales the wet amount** through the
-  per-FX `Velocity Amount` parameter (default 0.7, 0 = ignore). Pads are full strength.
-* Each FX also has a **sequenced punch lane** (`Pattern::fxLane`, 16 steps by default,
-  up to 64). Lane value = wet amount for that 16th, 0 = off; consecutive non-zero steps
-  hold the punch. It overrides the amount knob and ignores velocity.
-* `Engine::isFxEngaged(fx)` = resolved state (lane OR pad OR MIDI OR automation).
-  `FxSettings::engaged` is only the manual trigger input. **Always use the former for
-  UI feedback** — using the latter is a bug the tests caught once already.
+   `noteFxNeverLeavesANoteHangingUnderRandomAbuse` is the guard.
+6. **Fills wait 2 ms before committing** so a real note landing just after the grid
+   point (late host timing, humanised clips) wins instead of doubling.
+7. **Trigger notes are swallowed, everything else passes.** CCs, pitch bend and
+   aftertouch go through Seq Queen Notes untouched.
+8. **Velocity is part of the punch** in the FX device: wet amount ×
+   `1 - velamt × (1 - velocity)`. Pads count as full strength. Same rule the
+   instrument used, so it is covered by the existing velocity tests too.
 
 ---
 
-## 4. Verification checklist after building
+## 4. Verification in Ableton (not done yet)
 
-```bash
-ctest --preset core                       # must stay at 0 failures
-./build/core/opxy_demo demo/opxy_demo.wav # should sound like the committed demo
-```
+Setup is in README "In Ableton". Then:
 
-In Ableton:
+**Seq Queen FX**
+1. Hold each pad over a drum loop: tape stop sags and recovers, delay throw rings
+   after release, filter swoops, stutter repeats, reverb washes, bitcrush fizzes.
+   **No clicks** at press or release.
+2. MIDI To from another track reaches it: C1–F1 in a clip punch on time; a soft
+   note punches less than a hard one.
+3. Save the set, reopen: knob values restored.
 
-1. Drop it on a MIDI track → press play → you should hear a kick/snare-ish pattern
-   out of the box (the constructor fills in a 4-track starter groove).
-2. Hold each punch pad: tape stop sags and recovers, delay throw rings after release,
-   filter swoops, stutter repeats, reverb washes, bitcrush fizzes. **No clicks** at
-   press or release.
-3. Change focus track to 4, set a pad's target to *Focus Track*, punch it: only the
-   lead should be affected.
-4. Save the Live set, reopen: grid + p-locks + all parameters restored.
-5. Move the transport: the playhead in the grid follows bar 1 / bar 5 / loop points.
-6. Enable MIDI OUT, route the track to another track: notes arrive on channels 1–8.
+**Seq Queen Notes**
+1. MIDI From → the Notes track → *Seq Queen Notes* shows up as a choice, and the
+   clip plays the Drum Rack through it unchanged when nothing is held.
+2. Hats / kick+snare / fill / repeat land on Live's grid, including after looping
+   and relocating.
+3. Stop the transport mid-punch and mid-note: nothing hangs.
+4. The trigger notes (C-2–B-2) never reach the Drum Rack.
 
 ---
 
@@ -231,87 +179,65 @@ In Ableton:
 
 | # | Task | Notes |
 |---|---|---|
-| 1 | Try both devices in Live | follow README "In Ableton". Check: MIDI To reaches Seq Queen FX; MIDI From picks up Seq Queen Notes; fills/hats lock to Live's grid; no stuck notes when stopping mid-punch |
+| 1 | Try both devices in Live | section 4 |
 | 2 | Tune the punches | FX defaults in `FxProcessor.cpp` (`kDefault*`); note punch voicings (kick/snare pattern, hat accents, echo level) in `NoteFx::handleTick/handleInput` |
-| 3 | Melodic punches | the OP-XY's melodic octave is undocumented; good candidates: arpeggiate held chord, fifth/octave stack, strum, reverse order |
-| 4 | Decide the original instrument's fate | ask the user before removing `Source/Plugin` |
-| — | *(older list, for the original instrument)* | |
-| – | Punch-lane UI polish | the grid's `FX LANES` mode toggles 0/1 values only. Add: drag to set an amount (vertical drag), per-lane length, a lane clear/randomise button, and a "record pad presses into the lane" mode (arm, hold pads while the transport runs, write the gesture into the lane at the current step) |
-| – | Per-step pitch editing UI | the p-lock panel edits the selected step; a roll view (drag note in a mini piano-roll per track) would make it much faster to use |
-| – | Pattern chaining / song mode | add a `Pattern` bank (e.g. 8 patterns) + a chain list; keep `Engine` holding the *active* pattern and swap at bar boundaries |
-| – | Copy/paste bars, clear track, randomise | pure UI + `Pattern` helpers; `euclideanMask()` and the brains give you the randomiser for free |
-| – | Punch FX recording into automation | when a pad is held, write the `fx_*_on` parameter via `setValueNotifyingHost` so the gesture can be captured by the host |
-| – | Tempo-synced FX macros | stutter slice / delay time in note values from the host BPM rather than free seconds |
-| – | Sample playback per track | biggest remaining feature; add a `SampleEngine` next to `SynthEngine` behind the same `StepEvent` interface, load from a `FileChooser` in the mixer |
-| – | MIDI learn for punch pads | map CC → `fx_*_on`, or notes → pads (already partly done in `handleIncomingMidi`) |
-| – | Presets | `AudioProcessor::getNumPrograms` is 1; a small factory preset list of patterns would show the instrument off |
+| 3 | Melodic punches | the OP-XY's melodic octave is undocumented; candidates: arpeggiate held chord, fifth/octave stack, strum, reverse order |
+| 4 | Tempo-synced FX macros | stutter slice / delay time in note values from the host BPM rather than free seconds |
+| 5 | Pad presses into automation | when an FX pad is held, write `fx_*_on` via `setValueNotifyingHost` so Live can record the gesture |
+| 6 | Presets | a few starting points per device |
+| 7 | Old instrument code in the core | `Engine`, `Sequencer`, `SynthEngine`, `Pattern`, `PatternState`, their tests and the demo renderer are unused by the devices; ask the user before removing them |
 
 ---
 
 ## 6. Known rough edges (honest list)
 
-* **Mixer strips are tiny.** The seven per-track controls in the VOICES panel are
-  40 px wide linear sliders and read as tick marks; they work, but a later UI pass
-  should give them more room or turn them into the tick-ring dials.
-* **`render_demo.cpp` calls `barTime (13.5)`** but `barTime` takes an `int`, so the
-  lead filter sweep in the demo ends at bar 13, not 13.5. Left as is so the
-  committed WAV still matches; change the signature to `double` if you re-render.
-* **Editor is tall** (1180 x 810 default, 1020 x 740 minimum). Laptops in Live's
-  lower zone may need the standalone window or a scrollable host.
-* **No undo.** Step edits write straight into `Pattern` atomics. If you add undo,
-  route edits through a `ValueTree`-backed model instead.
+* **Live routing is unverified.** MIDI To into a VST3 audio effect and MIDI From a
+  VST3 instrument's MIDI output are both documented Live features, but neither has
+  been tried with these devices. The AU versions build and validate, but expect
+  VST3 to be the one that routes reliably.
+* **Notes' generators need a running transport** (they follow the host's ppq).
+  Mute, octave, shorten, random, skip and echo work while stopped.
+* **Random draws from the last 8 distinct pitches played**, so it does nothing
+  until at least two different notes have come through.
+* **Shorten and Echo schedule their own note-offs**; if the same pitch is played
+  again inside that window (a 32nd), the scheduled off cuts the new note short.
 * **`StutterFx` declick** fades 4 ms at slice edges — cheap, but a stutter that lands
   exactly on a transient can still tick. Test with drums.
 * **`DelayThrowFx` delay-time smoothing** uses a fixed coefficient (0.0008/sample),
-  so the smoothing time changes with host sample rate. Fine at 44.1/48 k, slightly
-  different at 88.2/96 k. If it matters, make the coefficient sample-rate aware.
-* **`Sequencer` resync heuristic** treats a ppq jump > 0.25 steps as a relocate/loop.
-  Hosts that report ppq with low resolution could false-trigger it. It was verified
-  with synthetic transport only, not with real hosts.
+  so the smoothing time changes with host sample rate. Fine at 44.1/48 k.
 * **`Svf::setParams` is called per sample** in `FilterSweepFx` (that's how the glide
-  works). It is cheap (one `tan` per sample) but it is the hottest line in the FX.
-  If profiles complain, recompute `setParams` every 8–16 samples.
-* **`Pattern` is non-copyable** (atomics). Anything that wants to snapshot a pattern
-  must go through `serialiseSteps()`; a proper snapshot type would be a nice refactor.
-* **MIDI out note-offs** are queued with a sample offset and emitted at the start of
-  the block in which they expire, so they can be up to one block late. Acceptable for
-  driving other instruments; not sample-accurate.
-* **`getFxNoteBase()`** returns the cached value updated during `processBlock`, so the
-  editor shows it correctly only after the first block runs.
-* **Punch-lane editing is binary in the UI** (a lane step is 0 or 1). The engine
-  supports any amount 0..1 and the serialiser round-trips it; only the grid's drag
-  gesture is missing. Same for per-lane length (`Pattern::fxLaneSteps` is global).
-* **Lanes are not host-automatable.** They are pattern data (saved in the state blob),
-  not APVTS parameters, so a host cannot automate a lane. If that turns out to matter,
-  expose a single `fx_*_seq` boolean parameter per FX and keep the lane values in the
-  pattern.
+  works). Cheap, but the hottest line in the FX.
+* **`render_demo.cpp` calls `barTime (13.5)`** but `barTime` takes an `int`, so the
+  lead filter sweep in the demo ends at bar 13, not 13.5. Left as is so the
+  committed WAV still matches.
 
 ---
 
 ## 7. Conventions
 
 * C++17, 4-space indent, `opxy::` namespace for the core, `SeqQueen*` class names in
-  the JUCE layer, parameter IDs `t<track>_<name>` / `fx_<fx>_<name>` (stable forever —
-  they are saved in sessions).
-* Member naming in the core is plain (`length`, `cutoff`); the JUCE layer uses the same
-  names for parameters. Comments explain *why*, not *what*.
+  the JUCE layer. Parameter IDs are stable forever (they are saved in Live sets):
+  `fx_<fx>_<name>` and `trigger_note` in the FX device; `trigger_note`,
+  `kick_note`, `snare_note`, `hat_note`, `repeat_rate` in the Notes device.
+* Comments explain *why*, not *what*.
 * Every engine change comes with a test in `tests/CoreTests.cpp`. The test file is the
   spec: read it to understand intended behaviour.
 * Effects must always be click-free at engage/release; the `maxDelta < 0.30` assertion
   in `punchInEffectsDoNotClickWhenEngagedAndReleased` is the guard.
+* Notes shown to the user use Live's octave numbering (middle C = C3, note 0 = C-2):
+  `ui::liveNoteName()`.
 
 ---
 
-## 8. If something in the core looks wrong
+## 8. If something looks wrong
 
 Trust the tests first, then this list, then the code:
 
 | Symptom | Look at |
 |---|---|
-| Steps fire late / early | `Sequencer::process`, `samplesPerStep`, swing/nudge maths |
-| Polyrhythm drifts | `((k % length) + length) % length` in `Sequencer::process` |
-| Ratchet hits missing | `pending` queue capacity + `scheduleHit()` insertion sort |
-| P-lock has no effect | `getPLock()` calls in `Sequencer::process` (voice params are resolved *at fire time*) |
 | FX audible after release forever | `hasTail()` in that FX |
-| Output quiet | voice `amp` in `SynthEngine::renderTrack`, track `level`, master gain, soft clip |
-| Output clipping | soft clip is bounded, so check for double-applied track gain |
+| Punch too weak from MIDI | `Velocity Amount` knob; `FxBus::applySettings` |
+| Generated notes off the grid | `NoteFx::process` tick maths (32nd grid from ppq) |
+| Generated note played twice | the `lastTick` guard in `NoteFx::process` |
+| Fill doubles a real note | fill tolerance (2 ms) in `handleInput` / `handleTick` |
+| Stuck note downstream | `mapped[][]` bookkeeping in `handleInput`; queue headroom in `schedule` |

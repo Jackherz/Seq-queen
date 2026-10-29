@@ -2,7 +2,7 @@
 
 #include "NotesProcessor.h"
 #include "../Shared/DeviceUi.h"
-#include "../../Plugin/SeqQueenLookAndFeel.h"
+#include "../Shared/SeqQueenLookAndFeel.h"
 
 class SeqQueenNotesEditor : public juce::AudioProcessorEditor, private juce::Timer
 {

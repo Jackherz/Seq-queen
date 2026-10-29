@@ -54,7 +54,7 @@ bool trackStepFires (const Track& track, int stepIndex, Prng& rng) noexcept
     if (! fires)
         return false;
 
-    // Note on the Euclid + toggles interaction (documented in docs/PLOCKS.md):
+    // Note on the Euclid + toggles interaction:
     // when the Euclidean brain is on it *replaces* the hand-drawn pattern, and
     // step toggles are ignored so the generated rhythm stays predictable.
 
