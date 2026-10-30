@@ -20,6 +20,9 @@ import json
 import struct
 import sys
 
+# Must match kEngineVersion in Source/Max/seqqueen_notes.cpp.
+ENGINE_VERSION = 4
+
 # ------------------------------------------------------------------ layout --
 PAD_W, PAD_H, GAP = 62, 24, 4
 ROW_Y = (24, 64)
@@ -95,21 +98,28 @@ def parameter(longname, shortname, kind, initial, **extra):
 # Core chain
 midiin = newobj("midiin", [20, 20, 45, 20], 1, 1, ["int"])
 engine = newobj("seqqueen.notes", [20, 60, 95, 20], 1, 1)
-router = newobj("route punch active sync", [20, 100, 140, 20], 2, 4)
+router = newobj("route punch active sync engine", [20, 100, 180, 20], 2, 5)
 midiout = newobj("midiout", [20, 300, 50, 20], 1, 0)
 connect(midiin, 0, engine, 0)
 connect(engine, 0, router, 0)
-connect(router, 3, midiout, 0)        # everything that isn't punch/active/sync: MIDI bytes
+connect(router, 4, midiout, 0)        # everything that isn't punch/active/sync/engine: MIDI bytes
 
-# Live's transport. Every engine tick sends "sync"; [plugsync~] answers with play
-# state (outlet 0), tempo (5) and song position in beats (6), straight back in.
-sync_bang = newobj("t b", [240, 140, 30, 20], 1, 1, ["bang"])
+# Live's transport, from two sources. Every engine tick sends "sync"; both
+# [plugsync~] (play state 0, tempo 5, position in beats 6) and [transport]
+# (resolution 3, tempo 4, state 6, raw ticks 7) answer straight back in, and the
+# engine uses whichever is actually moving (plugsync~ alone never moved in Live).
+sync_bang = newobj("t b b", [240, 140, 40, 20], 1, 2, ["bang", "bang"])
 plugsync = newobj("plugsync~", [240, 170, 120, 20], 1, 9)
+transport = newobj("transport", [420, 170, 120, 20], 2, 9)
 connect(router, 2, sync_bang, 0)
-connect(sync_bang, 0, plugsync, 0)
-for outlet, message, x_offset in ((0, "playing", 0), (5, "tempo", 80), (6, "beats", 160)):
-    forward = newobj("prepend " + message, [240 + x_offset, 200, 75, 20], 2, 1)
-    connect(plugsync, outlet, forward, 0)
+connect(sync_bang, 1, plugsync, 0)
+connect(sync_bang, 0, transport, 0)
+for source, outlet, message, x in ((plugsync, 0, "playing", 240), (plugsync, 5, "tempo", 320),
+                                   (plugsync, 6, "beats", 400), (transport, 3, "tres", 480),
+                                   (transport, 4, "ttempo", 560), (transport, 6, "tstate", 640),
+                                   (transport, 7, "tticks", 720)):
+    forward = newobj("prepend " + message, [x, 200, 75, 20], 2, 1)
+    connect(source, outlet, forward, 0)
     connect(forward, 0, engine, 0)
 
 # Seq Queen FX link: punch <fx> <strength> -> live.remote~ per effect.
@@ -228,8 +238,32 @@ connect(this_device, 0, swing, 0)
 
 # Words
 comment("SEQ QUEEN NOTES", [400, 400, 120, 18], [PADS_X, 4, 140, 18], size=11.0, colour=AMBER)
-comment("Click a pad, or hold C-2 to D#-1 in your clip. C0-A0 punch Seq Queen FX. Green pads need Live playing.",
-        [400, 430, 400, 18], [PADS_X, 104, 8 * (PAD_W + GAP), 16], size=8.5)
+hint = comment("Click a pad, or hold C-2 to D#-1 in your clip. C0-A0 punch Seq Queen FX. Green pads need Live playing.",
+               [400, 430, 400, 18], [PADS_X, 104, 8 * (PAD_W + GAP) + 160, 16], size=8.5)
+
+# Engine check. Max keeps the first copy of an external it loads until Live
+# quits, so after an update Live can be running the old engine with the new
+# patch (it happened: the grid punches silently never worked). On load: start a
+# 1 s timer, ask the engine "hello"; the right "engine N" reply stops the timer,
+# anything else (no reply from an old engine, or a wrong number) shows a warning.
+check = newobj("t b b", [400, 500, 40, 20], 1, 2, ["bang", "bang"])
+timeout = newobj("delay 1000", [460, 530, 70, 20], 2, 1, ["bang"])
+hello = box("message", [400, 530, 50, 20], text="hello", numinlets=2, numoutlets=1, outlettype=[""])
+version_ok = newobj("sel %d" % ENGINE_VERSION, [400, 560, 50, 20], 2, 2, ["bang", ""])
+stop = box("message", [400, 590, 40, 20], text="stop", numinlets=2, numoutlets=1, outlettype=[""])
+warn = box("message", [520, 590, 420, 20],
+           text="set RESTART LIVE: an older Seq Queen engine is still loaded (quit Live and reopen it)",
+           numinlets=2, numoutlets=1, outlettype=[""])
+connect(this_device, 0, check, 0)
+connect(check, 1, timeout, 0)          # right fires first: timer running before the reply
+connect(check, 0, hello, 0)
+connect(hello, 0, engine, 0)
+connect(router, 3, version_ok, 0)
+connect(version_ok, 0, stop, 0)
+connect(stop, 0, timeout, 0)
+connect(version_ok, 1, warn, 0)        # a reply, but the wrong version
+connect(timeout, 0, warn, 0)           # no reply at all
+connect(warn, 0, hint, 0)
 status = comment("FX: looking for Seq Queen FX...", [400, 460, 400, 18],
                  [PADS_X, 120, 8 * (PAD_W + GAP) + 160, 16], size=8.5, colour=[0.55, 0.57, 0.6, 1.0])
 connect(link, 10, status, 0)

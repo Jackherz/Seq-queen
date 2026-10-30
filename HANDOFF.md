@@ -87,6 +87,21 @@ Built and installed with everything else (target `seqqueen_m4l`, script
   (arm64 + x86_64) so it loads whether Live runs natively or under Rosetta
 * `~/Documents/Max 9/Packages/Seq Queen/javascript/seqqueen-link.js`
 
+**After changing the external, the user must quit and reopen Live.** Max keeps
+the first copy of an external it loads until the host process exits, so deleting
+and re-adding the device is not enough. A whole afternoon of engine fixes never
+reached the user's Live session this way (MaxPlugLib.log showed the device's new
+messages rejected with "doesn't understand"). Now the device asks the engine
+`hello` on load and shows RESTART LIVE in its hint line if the version
+(`kEngineVersion` in seqqueen_notes.cpp = `ENGINE_VERSION` in build_device.py)
+doesn't match or nothing answers. Bump both whenever the messages change.
+
+**Diagnostics:** the engine writes one line a second to
+`~/Library/Logs/Seq Queen Notes.log` (clock ticks, notes in/out, what plugsync~
+and [transport] report, which one it's using). Read it after the user reproduces
+a problem in Live. `~/Library/Application Support/Cycling '74/Max 9/Logs/MaxPlugLib.log`
+has Live's Max console errors.
+
 **Before trying a changed device in Live, run `tools/m4l/check_in_max.sh <device.amxd>`.**
 It hosts the device in the standalone Max app's `[amxd~]` (same loader as Live)
 and fails if Max doesn't survive, or if Max's log says any object failed to load
@@ -207,13 +222,14 @@ docs/ADDING_AN_FX.md             recipe for adding a seventh punch-in effect
    low-priority thread, which would make drums sloppy. `seqqueen.notes` runs the
    tested `NoteFx` on the scheduler; JS (`seqqueen-link.js`) only finds the FX
    device when the track's devices change.
-12. **The external's transport comes from `[plugsync~]`, its clock from
-   `systimer_gettime()`.** Every tick it sends `sync`; the patch polls
-   `plugsync~` and play state / tempo / beats come straight back in. Between
-   Live's per-buffer updates the position is extrapolated, never backwards. Max's
-   global ITM did not follow Live's playhead inside the device (fill, hats,
-   kick+snare, groove never fired), and its clock stops with the transport (stuck
-   note-offs). `seqqueen_max_smoke` fakes plugsync's per-buffer reports.
+12. **The external's transport comes from `[plugsync~]` and `[transport]`, its
+   clock from `systimer_gettime()`.** Every tick it sends `sync`; the patch polls
+   both and the answers come straight back in. The engine uses whichever source's
+   position is moving (plugsync~ first). In standalone Max plugsync~ never
+   answers and [transport] does; which one works inside Live is in the
+   diagnostics log. Between per-buffer updates the position is extrapolated,
+   never backwards. (Reading the global ITM from C was the first attempt; it was
+   never verified in Live because Live was still running an old engine.)
 13. **Pads are textbuttons in button mode.** Middle outlet (text, press only) →
    `padpress i`; left outlet (bang on press and release) → `padbang i`. The
    external treats a bang within 5 ms of a press as that press's own and any

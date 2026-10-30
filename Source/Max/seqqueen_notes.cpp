@@ -10,6 +10,13 @@
 //               latch <0|1>       pads latch (press on, press off) or are momentary
 //               playing <0|1>, tempo <bpm>, beats <position>
 //                                 Live's transport, from [plugsync~]
+//               hello             answered with "engine <version>", so the device
+//                                 can tell when Live still has an older copy of
+//                                 this external loaded (Max keeps the first copy
+//                                 it loads until Live quits)
+//               tstate <0|1>, ttempo <bpm>, tticks <ticks>, tres <ppq>
+//                                 the same from [transport]; whichever source
+//                                 is actually moving wins
 //               kick|snare|hat <note>, rate <0-2>, swing <0-0.6>
 //    outlet     one outlet, so the patch never depends on outlet order:
 //               <int>                 raw MIDI bytes for [midiout]
@@ -40,6 +47,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <new>
 
 namespace
@@ -49,8 +58,35 @@ constexpr int kFxFirstNote = 24;      // C0 in Live's numbering
 constexpr int kNumFxTriggers = 10;    // Seq Queen FX has ten effects
 constexpr int kMaxIn = 256;
 constexpr int kMaxOut = 1024;
+// Bump whenever the messages between the device and this external change, and
+// set ENGINE_VERSION in tools/m4l/build_device.py to match.
+constexpr long kEngineVersion = 4;
 constexpr double kPressBangWindowMs = 5.0;   // a press's own bang arrives with it
 constexpr double kMaxExtrapolationMs = 100.0;
+constexpr double kAliveMs = 250.0;           // a source whose position moved this recently is live
+constexpr int kMaxLogLines = 900;            // ~15 minutes of once-a-second lines
+
+/** One report of Live's transport: from [plugsync~] or from [transport]. */
+struct HostClock
+{
+    bool playing = false;
+    double tempo = 120.0;
+    double beats = 0.0;        // position in quarter notes
+    double beatsMs = 0.0;      // when that position last changed
+    long replies = 0;
+
+    void setBeats (double value, double now)
+    {
+        ++replies;
+        if (value != beats)
+        {
+            beats = value;
+            beatsMs = now;
+        }
+    }
+
+    bool moving (double now) const { return playing && now - beatsMs < kAliveMs; }
+};
 } // namespace
 
 struct t_sqnotes
@@ -77,13 +113,20 @@ struct t_sqnotes
     bool latched[opxy::kNumNoteFx];
     double lastPressMs[opxy::kNumNoteFx];
 
-    // Live's transport, as last reported by [plugsync~].
-    bool hostPlaying;
-    double hostTempo;
-    double hostBeats;          // last reported position, in quarter notes
-    double hostBeatsMs;        // when that position changed
+    // Live's transport, from two sources; see sqnotes_step for which is used.
+    HostClock plug;            // [plugsync~]
+    HostClock tport;           // [transport]
+    double tportResolution;    // [transport] ticks per quarter note
+    int source;                // 0 none yet, 1 plugsync, 2 transport
     bool wasPlaying;
     double lastPpq;            // where the previous step ended
+
+    // Diagnostics: one line a second to ~/Library/Logs/Seq Queen Notes.log, so a
+    // problem inside Live can be read off afterwards.
+    FILE* log;
+    int logLines;
+    double logStartMs, logLastMs;
+    long clockTicks, noteSteps, notesIn, notesOut;
 };
 
 static t_class* sqnotes_class = nullptr;
@@ -98,39 +141,80 @@ static void sqnotes_step (t_sqnotes* x)
     const double elapsedMs = std::max (0.0, now - x->lastMs);
     x->lastMs = now;
 
+    // Use whichever source is actually moving; plugsync~ first. If neither moves
+    // (stopped, or a source that never answers), take one that at least replies.
+    int source = 0;
+    if (x->plug.moving (now))
+        source = 1;
+    else if (x->tport.moving (now))
+        source = 2;
+    else if (x->plug.replies > 0)
+        source = 1;
+    else if (x->tport.replies > 0)
+        source = 2;
+    const HostClock none;
+    const HostClock& host = source == 1 ? x->plug : (source == 2 ? x->tport : none);
+    if (source != x->source)
+        x->wasPlaying = false;   // switching sources is a relocate, not a continuation
+    x->source = source;
+
     // At least one sample, so notes arriving in the same millisecond still move
     // the engine forward (and stay in order).
     const int numSamples = std::max (1, static_cast<int> (std::lround (elapsedMs * kVirtualRate / 1000.0)));
 
     opxy::TransportInfo transport;
-    transport.playing = x->hostPlaying;
-    transport.bpm = x->hostTempo > 1.0 ? x->hostTempo : 120.0;
+    transport.playing = host.playing;
+    transport.bpm = host.tempo > 1.0 ? host.tempo : 120.0;
     transport.hasPpq = true;
 
     // Live reports a new position once per audio buffer; in between, move on at
     // the tempo so the 32nd grid stays smooth.
-    double ppqNow = x->hostBeats;
-    if (x->hostPlaying)
-        ppqNow += std::min (now - x->hostBeatsMs, kMaxExtrapolationMs) / 60000.0 * transport.bpm;
+    double ppqNow = host.beats;
+    if (host.playing)
+        ppqNow += std::min (now - host.beatsMs, kMaxExtrapolationMs) / 60000.0 * transport.bpm;
 
     // Continuous playback: start exactly where the last step ended, so no grid
     // point is skipped or played twice. Otherwise (start, relocate, loop jump)
     // just take the new position.
-    const bool continuous = x->hostPlaying && x->wasPlaying
+    const bool continuous = host.playing && x->wasPlaying
                          && ppqNow >= x->lastPpq && ppqNow - x->lastPpq < 0.5;
-    if (x->hostPlaying && x->wasPlaying && ppqNow < x->lastPpq && x->lastPpq - ppqNow < 0.05)
+    if (host.playing && x->wasPlaying && ppqNow < x->lastPpq && x->lastPpq - ppqNow < 0.05)
         ppqNow = x->lastPpq;   // a fresh report slightly behind our estimate: don't step back
     transport.ppqAtBlockStart = continuous ? x->lastPpq
                                            : ppqNow - (elapsedMs / 1000.0) * transport.bpm / 60.0;
     x->lastPpq = ppqNow;
-    x->wasPlaying = x->hostPlaying;
+    x->wasPlaying = host.playing;
 
     // Whatever arrived since the last step happened "now", at the block's end.
     for (int i = 0; i < x->numIn; ++i)
         x->in[i].sampleOffset = numSamples - 1;
 
+    for (int i = 0; i < x->numIn; ++i)
+        x->notesIn += x->in[i].on ? 1 : 0;
+    ++x->noteSteps;
+
     const int count = x->fx->process (x->in, x->numIn, numSamples, transport, x->out, kMaxOut);
     x->numIn = 0;
+    for (int i = 0; i < count; ++i)
+        x->notesOut += x->out[i].on ? 1 : 0;
+
+    if (x->log != nullptr && now - x->logLastMs >= 1000.0 && x->logLines < kMaxLogLines)
+    {
+        // clock: engine ticks in the last second (should be ~1000); steps: all
+        // engine runs; notes: note-ons in and out (out > in = punches adding notes).
+        std::fprintf (x->log,
+                      "%7.1fs  clock %4ld  steps %4ld  notes in %3ld out %3ld  |  plugsync~: %ld replies, %s, %.1f bpm, beat %.3f  |  "
+                      "transport: %ld replies, %s, %.1f bpm, beat %.3f  |  using %s, playing %d, grid beat %.3f\n",
+                      (now - x->logStartMs) / 1000.0, x->clockTicks, x->noteSteps, x->notesIn, x->notesOut,
+                      x->plug.replies, x->plug.playing ? "playing" : "stopped", x->plug.tempo, x->plug.beats,
+                      x->tport.replies, x->tport.playing ? "playing" : "stopped", x->tport.tempo, x->tport.beats,
+                      source == 1 ? "plugsync~" : (source == 2 ? "transport" : "nothing"), transport.playing ? 1 : 0, ppqNow);
+        std::fflush (x->log);
+        ++x->logLines;
+        x->logLastMs = now;
+        x->clockTicks = x->noteSteps = x->notesIn = x->notesOut = 0;
+        x->plug.replies = x->tport.replies = 0;
+    }
 
     for (int i = 0; i < count; ++i)
     {
@@ -157,6 +241,7 @@ static void sqnotes_step (t_sqnotes* x)
 
 static void sqnotes_tick (t_sqnotes* x)
 {
+    ++x->clockTicks;
     sqnotes_step (x);
     clock_fdelay (x->clock, 1.0);
 }
@@ -261,17 +346,25 @@ static void sqnotes_padbang (t_sqnotes* x, long index)
         sqnotes_pad (x, index, 0);
 }
 
-static void sqnotes_playing (t_sqnotes* x, long on) { x->hostPlaying = on != 0; }
-static void sqnotes_tempo (t_sqnotes* x, double bpm) { x->hostTempo = bpm; }
-static void sqnotes_beats (t_sqnotes* x, double beats)
+// Repeated reports within one audio buffer carry the same position; only a
+// change restarts the extrapolation (HostClock::setBeats).
+static void sqnotes_playing (t_sqnotes* x, long on) { x->plug.playing = on != 0; }
+static void sqnotes_tempo (t_sqnotes* x, double bpm) { x->plug.tempo = bpm; }
+static void sqnotes_beats (t_sqnotes* x, double beats) { x->plug.setBeats (beats, systimer_gettime()); }
+
+static void sqnotes_tstate (t_sqnotes* x, long on) { x->tport.playing = on != 0; }
+static void sqnotes_ttempo (t_sqnotes* x, double bpm) { x->tport.tempo = bpm; }
+static void sqnotes_tres (t_sqnotes* x, long ppq) { if (ppq > 0) x->tportResolution = static_cast<double> (ppq); }
+static void sqnotes_tticks (t_sqnotes* x, double ticks)
 {
-    // Repeated reports within one audio buffer carry the same position; only a
-    // change restarts the extrapolation.
-    if (beats != x->hostBeats)
-    {
-        x->hostBeats = beats;
-        x->hostBeatsMs = systimer_gettime();
-    }
+    x->tport.setBeats (ticks / x->tportResolution, systimer_gettime());
+}
+
+static void sqnotes_hello (t_sqnotes* x)
+{
+    t_atom version;
+    atom_setlong (&version, kEngineVersion);
+    outlet_anything (x->outlet, gensym ("engine"), 1, &version);
 }
 
 static void sqnotes_latch (t_sqnotes* x, long on)
@@ -334,12 +427,25 @@ static void* sqnotes_new (t_symbol*, long, t_atom*)
     for (auto& t : x->lastPressMs)
         t = -1.0e9;
 
-    x->hostPlaying = false;
-    x->hostTempo = 120.0;
-    x->hostBeats = 0.0;
-    x->hostBeatsMs = systimer_gettime();
+    new (&x->plug) HostClock();
+    new (&x->tport) HostClock();
+    x->tportResolution = 480.0;
+    x->source = 0;
     x->wasPlaying = false;
     x->lastPpq = 0.0;
+
+    x->clockTicks = x->noteSteps = x->notesIn = x->notesOut = 0;
+    x->logLines = 0;
+    x->logStartMs = x->logLastMs = systimer_gettime();
+    x->log = nullptr;
+    if (const char* home = std::getenv ("HOME"))
+    {
+        char path[1024];
+        std::snprintf (path, sizeof (path), "%s/Library/Logs/Seq Queen Notes.log", home);
+        x->log = std::fopen (path, "w");
+        if (x->log != nullptr)
+            std::fprintf (x->log, "Seq Queen Notes diagnostics: one line a second while the device is loaded\n");
+    }
 
     x->lastMs = systimer_gettime();
     x->clock = clock_new (x, reinterpret_cast<method> (sqnotes_tick));
@@ -349,6 +455,8 @@ static void* sqnotes_new (t_symbol*, long, t_atom*)
 
 static void sqnotes_free (t_sqnotes* x)
 {
+    if (x->log != nullptr)
+        std::fclose (x->log);
     if (x->clock != nullptr)
     {
         clock_unset (x->clock);
@@ -369,11 +477,16 @@ extern "C" void ext_main (void*)
     class_addmethod (c, reinterpret_cast<method> (sqnotes_int),    "int",    A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_pad),    "pad",    A_LONG, A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_latch),  "latch",  A_LONG, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_hello),  "hello",  0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_padpress), "padpress", A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_padbang),  "padbang",  A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_playing),  "playing",  A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_tempo),    "tempo",    A_FLOAT, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_beats),    "beats",    A_FLOAT, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_tstate),   "tstate",   A_LONG, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_ttempo),   "ttempo",   A_FLOAT, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_tticks),   "tticks",   A_FLOAT, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_tres),     "tres",     A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_kick),   "kick",   A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_snare),  "snare",  A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_hat),    "hat",    A_LONG, 0);

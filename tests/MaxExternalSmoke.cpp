@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h>
 #include <dlfcn.h>
 #include <map>
 #include <string>
@@ -43,6 +44,8 @@ method gClockFn = nullptr;
 // The fake Live transport, as [plugsync~] would report it: the position only
 // updates once per 128-sample audio buffer, like Live's.
 double gTempo = 120.0, gBeats = 0.0, gReportedBeats = 0.0, gSinceReportMs = 0.0;
+bool gPlugsyncBroken = false;   // answers, but always "stopped at beat 0"
+bool gTransportAnswers = false;
 void* gObject = nullptr;
 double gSystemMs = 1000.0;   // the CPU clock: always moves
 long gRunning = 0;
@@ -88,11 +91,18 @@ void* outlet_int (void*, t_atom_long n)
 }
 void* outlet_anything (void*, t_symbol* s, short ac, t_atom* av)
 {
-    if (gSymbols[s] == "sync")   // the patch polls [plugsync~]; answers come straight back
+    if (gSymbols[s] == "sync")   // the patch polls [plugsync~] and [transport]; answers come straight back
     {
-        reinterpret_cast<void (*) (void*, double)> (gClass.methods["beats"]) (gObject, gReportedBeats);
+        reinterpret_cast<void (*) (void*, double)> (gClass.methods["beats"]) (gObject, gPlugsyncBroken ? 0.0 : gReportedBeats);
         reinterpret_cast<void (*) (void*, double)> (gClass.methods["tempo"]) (gObject, gTempo);
-        reinterpret_cast<void (*) (void*, long)> (gClass.methods["playing"]) (gObject, gRunning);
+        reinterpret_cast<void (*) (void*, long)> (gClass.methods["playing"]) (gObject, gPlugsyncBroken ? 0 : gRunning);
+        if (gTransportAnswers)
+        {
+            reinterpret_cast<void (*) (void*, long)> (gClass.methods["tres"]) (gObject, 480);
+            reinterpret_cast<void (*) (void*, double)> (gClass.methods["tticks"]) (gObject, gReportedBeats * 480.0);
+            reinterpret_cast<void (*) (void*, double)> (gClass.methods["ttempo"]) (gObject, gTempo);
+            reinterpret_cast<void (*) (void*, long)> (gClass.methods["tstate"]) (gObject, gRunning);
+        }
         return nullptr;
     }
     std::vector<double> values;
@@ -176,8 +186,21 @@ int main (int argc, char* argv[])
     expect (gClass.methods.count ("int") && gClass.methods.count ("pad") && gClass.methods.count ("swing"),
             "methods registered");
 
+    // The external writes a diagnostics log under $HOME; keep tests out of the real one.
+    char logHome[] = "/tmp/seqqueen-smoke-XXXXXX";
+    if (mkdtemp (logHome) != nullptr)
+    {
+        setenv ("HOME", logHome, 1);
+        std::system ((std::string ("mkdir -p '") + logHome + "/Library/Logs'").c_str());
+    }
+
     gObject = reinterpret_cast<void* (*) (t_symbol*, long, t_atom*)> (gClass.newMethod) (nullptr, 0, nullptr);
     expect (gObject != nullptr && gOutletCount == 1, "object created with one outlet");
+
+    // The device asks the engine its version on load, to catch Live still
+    // running an older copy of the external.
+    reinterpret_cast<void (*) (void*)> (gClass.methods["hello"]) (gObject);
+    expect (! gMessages["engine"].empty() && gMessages["engine"].back()[0] == 4, "engine answers hello with its version");
 
     // Pass-through: a note goes straight out, unchanged, with no clock tick needed.
     sendBytes ({ 0x90, 60, 100 });
@@ -248,6 +271,34 @@ int main (int argc, char* argv[])
         if (gMidi[i + 1] == 40)
             ((gMidi[i] & 0xF0) == 0x90 && gMidi[i + 2] > 0 ? fillOns : fillOffs) += 1;
     expect (fillOns == fillOffs, "every fill note got its note-off");
+
+    // If plugsync~ answers but never moves (what Live seemed to do), the grid
+    // must still run off [transport].
+    gPlugsyncBroken = true;
+    gTransportAnswers = true;
+    gMidi.clear();
+    sendBytes ({ 0x90, 5, 100 });              // F-2: Hats
+    advanceMs (1000.0);
+    sendBytes ({ 0x80, 5, 0 });
+    expect (countNoteOns (42) >= 7 && countNoteOns (42) <= 9, "grid runs off [transport] when plugsync~ is stuck");
+    gPlugsyncBroken = false;
+    gTransportAnswers = false;
+    advanceMs (300.0);
+
+    {
+        std::FILE* log = std::fopen ((std::string (logHome) + "/Library/Logs/Seq Queen Notes.log").c_str(), "r");
+        char line[512] = {};
+        int lines = 0;
+        bool sawTransport = false;
+        while (log != nullptr && std::fgets (line, sizeof (line), log) != nullptr)
+        {
+            ++lines;
+            sawTransport = sawTransport || std::strstr (line, "using transport") != nullptr;
+        }
+        if (log != nullptr)
+            std::fclose (log);
+        expect (lines > 3 && sawTransport, "diagnostics log is written and names the source in use");
+    }
 
     // Regression: with the transport stopped, a shortened note must still end on
     // time. Timing off the transport clock (which stops) left it hanging.

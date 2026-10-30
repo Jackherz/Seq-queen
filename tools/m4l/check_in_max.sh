@@ -39,6 +39,10 @@ PY
 # crash again and make every later check fail. Start from a clean slate.
 rm -f "$HOME/Library/Application Support/Cycling '74/Max 9/Crash Recovery/"maxworkspace-*.txt
 
+LOGS="$HOME/Library/Application Support/Cycling '74/Max 9/Logs"
+size_of() { [ -f "$1" ] && wc -c < "$1" | tr -d ' ' || echo 0; }
+PLUG_START=$(size_of "$LOGS/MaxPlugLib.log")
+
 if pgrep -x Max >/dev/null; then
     echo "Max is already running; quit it first." >&2
     exit 2
@@ -61,8 +65,13 @@ fi
 # with its patch cords (that's how a broken live.thisdevice slipped through).
 # Max logs those; the Live API itself only exists in Live, so its errors here
 # are expected and ignored.
-LOG="$HOME/Library/Application Support/Cycling '74/Max 9/Logs/Max.log"
-PROBLEMS="$(grep -E "error\]" "$LOG" | grep -i -E "patchcord|no such object|couldn't|could not|not found" \
+# Objects that didn't load land in Max.log; messages an object rejects ("doesn't
+# understand", e.g. a device newer than the external Max has loaded) land in
+# MaxPlugLib.log, which Live writes to as well, so only this run's part is read.
+LOG="$LOGS/Max.log"
+PLUG_NEW="$(tail -c +"$((PLUG_START + 1))" "$LOGS/MaxPlugLib.log" 2>/dev/null || true)"
+PROBLEMS="$( { grep -E "error\]" "$LOG"; echo "$PLUG_NEW" | grep -a -E "error\]"; } \
+            | grep -i -E "patchcord|no such object|couldn't|could not|not found|doesn't understand" \
             | grep -v -i "liveapi\|live api" || true)"
 if [ -n "$PROBLEMS" ]; then
     echo "FAILED: Max loaded $(basename "$DEVICE") but reported problems:" >&2
