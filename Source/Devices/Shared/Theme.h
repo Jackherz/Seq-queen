@@ -54,6 +54,10 @@ inline juce::Colour fxAccent (int fxIndex)
         case 3: return green;    // stutter
         case 4: return bone;     // reverb
         case 5: return red;      // bitcrush
+        case 6: return juce::Colour (0xffd47fc4);   // reverse
+        case 7: return juce::Colour (0xffe8c45a);   // gate
+        case 8: return juce::Colour (0xff7fb2ea);   // high-pass
+        case 9: return juce::Colour (0xffa6d96a);   // pitch
         default: break;
     }
     return amber;

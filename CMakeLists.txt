@@ -58,6 +58,10 @@ add_library(opxy_core STATIC
     Source/Core/StutterFx.cpp
     Source/Core/ReverbBurstFx.cpp
     Source/Core/BitcrushFx.cpp
+    Source/Core/ReverseFx.cpp
+    Source/Core/GateFx.cpp
+    Source/Core/HighPassFx.cpp
+    Source/Core/PitchShiftFx.cpp
     Source/Core/FxChain.cpp
     Source/Core/FxBus.cpp
     Source/Core/NoteFx.cpp

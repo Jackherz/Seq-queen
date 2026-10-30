@@ -5,7 +5,7 @@ namespace
 using opxy::NoteFxType;
 
 constexpr int kWidth = 900;
-constexpr int kHeight = 430;
+constexpr int kHeight = 534;
 constexpr int kMargin = 16;
 constexpr int kHeaderHeight = 64;
 constexpr int kRowLabelHeight = 18;
@@ -13,6 +13,7 @@ constexpr int kPadHeight = 78;
 constexpr int kSettingsHeight = 92;
 constexpr int kFooterHeight = 26;
 constexpr int kPadsPerRow = 6;
+constexpr int kNumRows = 3;
 
 /** Colour by what the punch does: adds notes, removes them, moves pitch, or
     reshapes timing. */
@@ -32,6 +33,11 @@ juce::Colour accentFor (NoteFxType type)
         case NoteFxType::OctaveDown:
         case NoteFxType::Random:
             return opxy::ui::cyan;
+        case NoteFxType::Arp:
+        case NoteFxType::Chord:
+        case NoteFxType::Strum:
+        case NoteFxType::Groove:
+            return opxy::ui::amber;
         case NoteFxType::Shorten:
         case NoteFxType::Skip:
         case NoteFxType::Echo:
@@ -71,13 +77,16 @@ SeqQueenNotesEditor::SeqQueenNotesEditor (SeqQueenNotesProcessor& p)
     for (auto* knob : { &kickKnob, &snareKnob, &hatKnob })
         knob->formatValue = noteValue;
 
-    for (auto* knob : { &triggerKnob, &kickKnob, &snareKnob, &hatKnob })
+    swingKnob.formatValue = [] (double v) { return juce::String (juce::roundToInt (v * 100.0)) + "%"; };
+
+    for (auto* knob : { &triggerKnob, &kickKnob, &snareKnob, &hatKnob, &swingKnob })
         addAndMakeVisible (*knob);
 
     triggerAttachment = std::make_unique<SliderAttachment> (proc.state, "trigger_note", triggerKnob.slider);
     kickAttachment    = std::make_unique<SliderAttachment> (proc.state, "kick_note", kickKnob.slider);
     snareAttachment   = std::make_unique<SliderAttachment> (proc.state, "snare_note", snareKnob.slider);
     hatAttachment     = std::make_unique<SliderAttachment> (proc.state, "hat_note", hatKnob.slider);
+    swingAttachment   = std::make_unique<SliderAttachment> (proc.state, "groove_swing", swingKnob.slider);
 
     opxy::ui::styleCombo (repeatRate);
     repeatRate.addItemList ({ "1/8", "1/16", "1/32" }, 1);
@@ -126,8 +135,10 @@ void SeqQueenNotesEditor::paint (juce::Graphics& g)
     text (g, status, shownRunning ? "HOST PLAYING" : "STOPPED: GREEN PADS NEED PLAY",
           monoFont (8.5f), shownRunning ? green : textDim);
 
-    const char* rows[2] = { "RHYTHM  -  mute, roll, fill, add drums", "PITCH + SHAPE  -  move, chop, thin out, echo" };
-    for (int row = 0; row < 2; ++row)
+    const char* rows[kNumRows] = { "RHYTHM  -  mute, roll, fill, add drums",
+                                   "PITCH + SHAPE  -  move, chop, thin out, echo",
+                                   "PLAYING  -  arpeggiate, stack, strum, groove" };
+    for (int row = 0; row < kNumRows; ++row)
     {
         text (g, area.removeFromTop (kRowLabelHeight), rows[row], captionFont (8.0f), textDim);
         area.removeFromTop (kPadHeight + 8);
@@ -136,7 +147,7 @@ void SeqQueenNotesEditor::paint (juce::Graphics& g)
     text (g, area.removeFromTop (kRowLabelHeight), "SETTINGS", captionFont (8.0f), textDim);
 
     const auto rate = repeatRate.getBounds();
-    text (g, rate.withY (rate.getBottom() + 6).withHeight (12), "REPEAT RATE",
+    text (g, rate.withY (rate.getBottom() + 6).withHeight (12), "REPEAT / ARP RATE",
           captionFont (7.5f), textDim, juce::Justification::centred);
 
     const auto footer = getLocalBounds().reduced (kMargin, 0).removeFromBottom (kFooterHeight);
@@ -154,12 +165,12 @@ void SeqQueenNotesEditor::resized()
     const int gap = 8;
     const int padWidth = (area.getWidth() - gap * (kPadsPerRow - 1)) / kPadsPerRow;
 
-    for (int row = 0; row < 2; ++row)
+    for (int row = 0; row < kNumRows; ++row)
     {
         area.removeFromTop (kRowLabelHeight);
         auto line = area.removeFromTop (kPadHeight);
         area.removeFromTop (8);
-        for (int k = 0; k < kPadsPerRow; ++k)
+        for (int k = 0; k < kPadsPerRow && row * kPadsPerRow + k < opxy::kNumNoteFx; ++k)
         {
             pads[row * kPadsPerRow + k]->setBounds (line.removeFromLeft (padWidth));
             line.removeFromLeft (gap);
@@ -170,7 +181,7 @@ void SeqQueenNotesEditor::resized()
     auto settings = area.removeFromTop (kSettingsHeight - kRowLabelHeight + 8);
     triggerKnob.setBounds (settings.removeFromLeft (120));
     settings.removeFromLeft (gap);
-    for (auto* knob : { &kickKnob, &snareKnob, &hatKnob })
+    for (auto* knob : { &kickKnob, &snareKnob, &hatKnob, &swingKnob })
     {
         knob->setBounds (settings.removeFromLeft (90));
         settings.removeFromLeft (gap);

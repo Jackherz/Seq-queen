@@ -8,7 +8,7 @@
 //    1. Put it on a MIDI track and play your clip on that track.
 //    2. On the instrument track (Drum Rack, synth...), set MIDI From -> that
 //       track -> Seq Queen Notes, and Monitor -> In.
-//    3. Hold the trigger notes (C-2..B-2 by default, below anything a Drum Rack
+//    3. Hold the trigger notes (C-2..D#-1 by default, below anything a Drum Rack
 //       uses) in the clip, from a keyboard, or with the pads.
 // -----------------------------------------------------------------------------
 
@@ -60,6 +60,7 @@ private:
     std::atomic<float>* snareNote = nullptr;
     std::atomic<float>* hatNote = nullptr;
     std::atomic<float>* repeatRate = nullptr;
+    std::atomic<float>* swing = nullptr;
     std::atomic<bool> transportRunning { false };
 
     std::vector<opxy::NoteEvent> input, output;

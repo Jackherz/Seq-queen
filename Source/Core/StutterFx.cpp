@@ -64,6 +64,20 @@ void StutterFx::onEngage (bool nowEngaged)
     }
 }
 
+void StutterFx::record (float left, float right) noexcept
+{
+    history.write (0, left);
+    history.write (1, right);
+    history.advance();
+    writeAbs += 1.0;
+}
+
+void StutterFx::listen (const float* left, const float* right, int numSamples)
+{
+    for (int i = 0; i < numSamples; ++i)
+        record (left[i], right[i]);
+}
+
 void StutterFx::processWet (float* left, float* right, int numSamples)
 {
     const int size = history.getSize();
@@ -73,10 +87,7 @@ void StutterFx::processWet (float* left, float* right, int numSamples)
     for (int i = 0; i < numSamples; ++i)
     {
         // Keep a rolling history of the dry input.
-        history.write (0, left[i]);
-        history.write (1, right[i]);
-        history.advance();
-        writeAbs += 1.0;
+        record (left[i], right[i]);
 
         if (looping && loopLength > 1.0)
         {

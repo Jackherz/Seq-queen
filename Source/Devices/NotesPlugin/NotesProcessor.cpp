@@ -22,6 +22,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout SeqQueenNotesProcessor::crea
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "repeat_rate", 1 },
                                                               "Repeat Rate",
                                                               juce::StringArray { "1/8", "1/16", "1/32" }, 1));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "groove_swing", 1 }, "Groove Swing",
+                                                             juce::NormalisableRange<float> (0.0f, 0.6f, 0.01f), 0.33f));
     return layout;
 }
 
@@ -34,6 +36,7 @@ SeqQueenNotesProcessor::SeqQueenNotesProcessor()
     snareNote   = state.getRawParameterValue ("snare_note");
     hatNote     = state.getRawParameterValue ("hat_note");
     repeatRate  = state.getRawParameterValue ("repeat_rate");
+    swing       = state.getRawParameterValue ("groove_swing");
 
     input.reserve (kMaxEvents);
     output.resize (kMaxEvents);
@@ -67,6 +70,7 @@ void SeqQueenNotesProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     settings.snareNote.store (static_cast<int> (std::lround (snareNote->load())));
     settings.hatNote.store (static_cast<int> (std::lround (hatNote->load())));
     settings.repeatRate.store (static_cast<int> (std::lround (repeatRate->load())));
+    settings.swing.store (swing->load());
 
     opxy::TransportInfo transport;
     if (auto* playHead = getPlayHead())

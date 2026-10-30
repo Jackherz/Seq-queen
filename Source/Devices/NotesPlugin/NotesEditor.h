@@ -28,8 +28,9 @@ private:
     opxy::ui::LabelledKnob kickKnob { "kick note" };
     opxy::ui::LabelledKnob snareKnob { "snare note" };
     opxy::ui::LabelledKnob hatKnob { "hat note" };
+    opxy::ui::LabelledKnob swingKnob { "groove swing" };
     juce::ComboBox repeatRate;
-    std::unique_ptr<SliderAttachment> triggerAttachment, kickAttachment, snareAttachment, hatAttachment;
+    std::unique_ptr<SliderAttachment> triggerAttachment, kickAttachment, snareAttachment, hatAttachment, swingAttachment;
     std::unique_ptr<ComboAttachment> repeatAttachment;
 
     int shownTrigger = -1;

@@ -243,6 +243,8 @@ void Engine::processChunk (float* const* outputChannels,
     // Done after the clock so the sequenced punch lanes resolve against the step
     // this block actually starts on (and so the very first block is correct).
     applyFxRouting();
+    masterChain.setTransport (transport);
+    focusChain.setTransport (transport);
 
     // ---- 4. Render voices, starting notes at their exact sample offsets ------
     samplesPerStepCache = sequencer.getSamplesPerStep();

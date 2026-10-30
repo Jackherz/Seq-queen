@@ -23,6 +23,9 @@ public:
     void prepare (double sampleRate, int maxBlockSize);
     void reset();
 
+    /** Host tempo/position for the next process() call (tempo-synced FX). */
+    void setTransport (const TransportInfo& newTransport) noexcept { transport = newTransport; }
+
     /** Processes a stereo block in place. Any block size is accepted. */
     void process (float* left, float* right, int numSamples);
 
@@ -44,6 +47,8 @@ private:
     std::atomic<float> effectiveAmount[kMaxFx];
     std::atomic<bool> engaged[kMaxFx];
     int maxBlockSize = kMaxBlockSize;
+    double sampleRate = 44100.0;
+    TransportInfo transport;
 };
 
 } // namespace opxy

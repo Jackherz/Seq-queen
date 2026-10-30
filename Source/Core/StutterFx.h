@@ -24,11 +24,15 @@ public:
     void setPunchParam (int index, float value) override;
     float getPunchParam (int index) const override;
 
+    void listen (const float* left, const float* right, int numSamples) override;
+
 protected:
     void onEngage (bool nowEngaged) override;
     void processWet (float* left, float* right, int numSamples) override;
 
 private:
+    void record (float left, float right) noexcept;
+
     DelayLine history;            // rolling history of the live signal
     double writeAbs = 0.0;
     double loopStart = 0.0;

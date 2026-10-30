@@ -56,6 +56,10 @@ enum class FxType : int
     Stutter,
     ReverbBurst,
     Bitcrush,
+    Reverse,       // appended: indices are saved in sessions, never reorder
+    Gate,
+    HighPass,
+    PitchShift,
     Count
 };
 
@@ -167,6 +171,10 @@ inline const char* fxTypeName (FxType f) noexcept
         case FxType::Stutter:     return "Stutter";
         case FxType::ReverbBurst: return "Reverb";
         case FxType::Bitcrush:    return "Bitcrush";
+        case FxType::Reverse:     return "Reverse";
+        case FxType::Gate:        return "Gate";
+        case FxType::HighPass:    return "High-Pass";
+        case FxType::PitchShift:  return "Pitch";
         case FxType::Count:       break;
     }
     return "?";
@@ -182,6 +190,10 @@ inline const char* fxTypeId (FxType f) noexcept
         case FxType::Stutter:     return "stutter";
         case FxType::ReverbBurst: return "reverb";
         case FxType::Bitcrush:    return "crush";
+        case FxType::Reverse:     return "reverse";
+        case FxType::Gate:        return "gate";
+        case FxType::HighPass:    return "highpass";
+        case FxType::PitchShift:  return "pitch";
         case FxType::Count:       break;
     }
     return "?";

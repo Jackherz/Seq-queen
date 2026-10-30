@@ -5,10 +5,11 @@
 //
 //  Put it on any track or bus. Punches come from:
 //    * the on-screen pads (hold),
-//    * MIDI notes: six notes from `trigger_note` up (C1..F1 by default). In Live,
+//    * MIDI notes: ten notes from `trigger_note` up (C1..A1 by default). In Live,
 //      draw them in a clip on a MIDI track and set that track's "MIDI To" to this
 //      track / Seq Queen FX. Note velocity sets how hard it punches.
-//    * automation of each effect's "Punch" parameter.
+//    * each effect's "Punch" parameter (0 = off, above 0 = strength): automation,
+//      or the Seq Queen Max for Live device on the same track.
 // -----------------------------------------------------------------------------
 
 #include <JuceHeader.h>
@@ -60,7 +61,7 @@ private:
         std::atomic<float>* a = nullptr;
         std::atomic<float>* b = nullptr;
         std::atomic<float>* velocity = nullptr;
-        std::atomic<float>* on = nullptr;
+        std::atomic<float>* punch = nullptr;
     };
 
     opxy::FxBus bus;

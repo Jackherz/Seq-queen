@@ -20,6 +20,10 @@
 #include "StutterFx.h"
 #include "ReverbBurstFx.h"
 #include "BitcrushFx.h"
+#include "ReverseFx.h"
+#include "GateFx.h"
+#include "HighPassFx.h"
+#include "PitchShiftFx.h"
 #include "FxBus.h"
 #include "NoteFx.h"
 
@@ -924,6 +928,22 @@ TEST (punchInEffectsDoNotClickWhenEngagedAndReleased)
         opxy::BitcrushFx fx;
         runOne (fx);
     }
+    {
+        opxy::ReverseFx fx;
+        runOne (fx);
+    }
+    {
+        opxy::GateFx fx;
+        runOne (fx);
+    }
+    {
+        opxy::HighPassFx fx;
+        runOne (fx);
+    }
+    {
+        opxy::PitchShiftFx fx;
+        runOne (fx);
+    }
 }
 
 TEST (delayThrowKeepsTailingAfterRelease)
@@ -1513,6 +1533,263 @@ TEST (noteFxNeverLeavesANoteHangingUnderRandomAbuse)
 
     const auto run = runNoteFx (fx, input, time + 60000, 256);
     CHECK (run.events.size() > 400);
+    CHECK (everyOnHasAnOff (run));
+}
+
+// ------------------------------- new punch FX ---------------------------------
+
+namespace
+{
+// Feeds `signal(sampleIndex)` through an FxChain-style idle/active loop: the
+// effect listens while idle and processes once engaged at `engageAt`.
+std::vector<float> runIdleThenEngaged (opxy::PunchInFx& fx, const std::function<float (int)>& signal,
+                                       int engageAt, int total, int block = 256)
+{
+    fx.prepare (kSampleRate, block);
+    std::vector<float> out;
+    std::vector<float> l (static_cast<std::size_t> (block)), r (static_cast<std::size_t> (block));
+    for (int pos = 0; pos < total; pos += block)
+    {
+        for (int i = 0; i < block; ++i)
+            l[static_cast<std::size_t> (i)] = r[static_cast<std::size_t> (i)] = signal (pos + i);
+        fx.setEngaged (pos >= engageAt);
+        if (fx.isActive())
+            fx.process (l.data(), r.data(), block);
+        else
+            fx.listen (l.data(), r.data(), block);
+        out.insert (out.end(), l.begin(), l.end());
+    }
+    return out;
+}
+
+int zeroCrossings (const std::vector<float>& v, std::size_t from, std::size_t to)
+{
+    int count = 0;
+    for (std::size_t i = from + 1; i < to; ++i)
+        count += (v[i - 1] < 0.0f) != (v[i] < 0.0f) ? 1 : 0;
+    return count;
+}
+} // namespace
+
+TEST (stutterLoopsTheAudioThatJustPlayedNotStaleHistory)
+{
+    // Regression: idle effects weren't recording, so the first punch looped
+    // silence. A sine plays for half a second before the punch.
+    opxy::StutterFx fx;
+    fx.setPunchParam (0, 0.2f);
+    fx.setPunchParam (1, 1.0f / 3.0f);   // 1x
+    const int engageAt = static_cast<int> (kSampleRate * 0.5);
+    const auto out = runIdleThenEngaged (fx, [] (int i) { return 0.4f * static_cast<float> (std::sin (0.05 * i)); },
+                                         engageAt, engageAt + static_cast<int> (kSampleRate * 0.5));
+    double energy = 0.0;
+    for (std::size_t i = static_cast<std::size_t> (engageAt + 4800); i < out.size(); ++i)
+        energy += static_cast<double> (out[i]) * out[i];
+    CHECK (std::sqrt (energy / static_cast<double> (out.size() - static_cast<std::size_t> (engageAt + 4800))) > 0.15);
+}
+
+TEST (reversePlaysTheLastBeatBackwards)
+{
+    // A rising ramp, reversed, must fall.
+    opxy::ReverseFx fx;
+    fx.setPunchParam (0, 0.5f);           // one beat
+    fx.setPunchParam (1, 1.0f / 3.0f);    // 1x
+    opxy::TransportInfo transport;
+    transport.bpm = 120.0;
+    fx.setTransport (transport);
+
+    const int engageAt = static_cast<int> (kSampleRate);
+    const auto out = runIdleThenEngaged (fx, [] (int i) { return static_cast<float> (i % 48000) / 48000.0f; },
+                                         engageAt, engageAt + 12000);
+    // Inside the first reversed segment (past the fade-in), the output falls.
+    int falling = 0, rising = 0;
+    for (std::size_t i = static_cast<std::size_t> (engageAt + 2000); i < static_cast<std::size_t> (engageAt + 10000); ++i)
+        (out[i] < out[i - 1] ? falling : rising) += 1;
+    CHECK (falling > rising * 10);
+    CHECK (opxy::ReverseFx::lengthBeats (0.0f) == 0.25 && opxy::ReverseFx::lengthBeats (1.0f) == 4.0);
+}
+
+TEST (gateChopsInTimeWithTheHost)
+{
+    opxy::GateFx fx;
+    fx.prepare (kSampleRate, 256);
+    fx.setPunchParam (0, 2.0f / 3.0f);   // 1/16
+    fx.setPunchParam (1, 0.0f);          // hard gate
+    fx.setEngaged (true);
+
+    // 120 bpm: a 16th is 6000 samples; on for the first 3000, off for the rest.
+    std::vector<float> l (256), r (256), out;
+    for (int pos = 0; pos < 48000; pos += 256)
+    {
+        opxy::TransportInfo transport;
+        transport.playing = transport.hasPpq = true;
+        transport.bpm = 120.0;
+        transport.ppqAtBlockStart = pos / 24000.0;
+        fx.setTransport (transport);
+        std::fill (l.begin(), l.end(), 0.5f);
+        std::fill (r.begin(), r.end(), 0.5f);
+        fx.process (l.data(), r.data(), 256);
+        out.insert (out.end(), l.begin(), l.end());
+    }
+    // Well after the engage ramp: middle of an "on" half vs an "off" half.
+    CHECK (out[36000 + 1500] > 0.45f);
+    CHECK (out[36000 + 4500] < 0.05f);
+    CHECK (out[42000 + 1500] > 0.45f);
+    CHECK (opxy::GateFx::divisionBeats (0.0f) == 1.0 && opxy::GateFx::divisionBeats (1.0f) == 0.125);
+}
+
+TEST (highPassDrainsTheBassWhenEngaged)
+{
+    opxy::HighPassFx fx;
+    fx.prepare (kSampleRate, 256);
+    fx.setPunchParam (0, 0.75f);
+    const auto measure = [&fx] (bool engaged)
+    {
+        fx.setEngaged (engaged);
+        std::vector<float> l (256), r (256);
+        double sum = 0.0;
+        for (int i = 0; i < 120; ++i)
+        {
+            for (int s = 0; s < 256; ++s)
+                l[static_cast<std::size_t> (s)] = r[static_cast<std::size_t> (s)]
+                    = 0.4f * static_cast<float> (std::sin (2.0 * 3.14159265 * 60.0 * (i * 256 + s) / kSampleRate));
+            fx.process (l.data(), r.data(), 256);
+            if (i > 80)
+                for (float v : l)
+                    sum += static_cast<double> (v) * v;
+        }
+        return std::sqrt (sum / (39.0 * 256.0));
+    };
+    const double open = measure (false);
+    const double swept = measure (true);
+    CHECK (open > 0.2);
+    CHECK (swept < open * 0.2);
+}
+
+TEST (pitchShiftMovesTheToneByTheInterval)
+{
+    for (const float interval : { 1.0f, 0.0f })   // +12, then -12
+    {
+        opxy::PitchShiftFx fx;
+        fx.setPunchParam (0, interval);
+        fx.setPunchParam (1, 0.4f);
+        const auto out = runIdleThenEngaged (fx,
+            [] (int i) { return 0.4f * static_cast<float> (std::sin (2.0 * 3.14159265 * 440.0 * i / kSampleRate)); },
+            0, static_cast<int> (kSampleRate * 1.5));
+        // Count over the last second (well past the engage ramp).
+        const double hz = zeroCrossings (out, static_cast<std::size_t> (kSampleRate * 0.5), out.size()) / 2.0;
+        const double expected = interval > 0.5f ? 880.0 : 220.0;
+        CHECK (std::abs (hz - expected) < expected * 0.08);
+    }
+    CHECK (opxy::PitchShiftFx::semitones (0.0f) == -12 && opxy::PitchShiftFx::semitones (1.0f) == 12);
+}
+
+TEST (fxBusFollowsTheHostTempoForTheGate)
+{
+    opxy::FxBus bus;
+    bus.prepare (kSampleRate, 4096);
+    const int gate = static_cast<int> (opxy::FxType::Gate);
+    bus.getSettings (gate).amount.store (1.0f);
+    bus.getSettings (gate).paramA.store (0.0f);   // 1/4
+    bus.getSettings (gate).paramB.store (0.0f);
+    bus.getSettings (gate).engaged.store (true);
+
+    // One big block of 2 beats at 120 bpm; ppq comes from the host only once.
+    opxy::TransportInfo transport;
+    transport.playing = transport.hasPpq = true;
+    transport.bpm = 120.0;
+    std::vector<float> l (48000, 0.5f), r (48000, 0.5f);
+    bus.setTransport (transport);
+    bus.process (l.data(), r.data(), 48000);
+    CHECK (l[24000 + 6000] > 0.45f);    // first half of beat 2: open
+    CHECK (l[24000 + 18000] < 0.05f);   // second half: closed
+}
+
+TEST (noteFxArpPlaysHeldNotesUpOnTheGrid)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    // Chord C-E-G held for a bar with the arp on at 1/16.
+    const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::Arp), 1.0f, true },
+                                      { 0, 67, 0.8f, true }, { 0, 60, 0.8f, true }, { 0, 64, 0.8f, true },
+                                      { kSixteenth * 16 - 10, 60, 0.0f, false }, { kSixteenth * 16 - 10, 64, 0.0f, false },
+                                      { kSixteenth * 16 - 10, 67, 0.0f, false } },
+                                kSixteenth * 16);
+    std::vector<int> ons;
+    for (const auto& e : run.events)
+        if (e.on)
+            ons.push_back (e.note);
+    CHECK (ons.size() == 16);
+    CHECK (ons.size() >= 4 && ons[0] == 60 && ons[1] == 64 && ons[2] == 67 && ons[3] == 60);
+    CHECK (everyOnHasAnOff (run));
+}
+
+TEST (noteFxChordAddsFifthAndOctaveAndClosesThemAll)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const int chord = trig (opxy::NoteFxType::Chord);
+    // Chord released before the note: all three must still be closed.
+    const auto run = runNoteFx (fx, { { 0, chord, 1.0f, true }, { 100, 48, 0.8f, true },
+                                      { 500, chord, 0.0f, false }, { 3000, 48, 0.0f, false } }, 6000);
+    CHECK (countOns (run, 48) == 1 && countOns (run, 55) == 1 && countOns (run, 60) == 1);
+    CHECK (everyOnHasAnOff (run));
+}
+
+TEST (noteFxStrumSpreadsChordsAndFlamsSingleHits)
+{
+    {
+        opxy::NoteFx fx;
+        fx.prepare (kSampleRate);
+        const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::Strum), 1.0f, true },
+                                          { 1000, 60, 0.8f, true }, { 1000, 64, 0.8f, true }, { 1000, 67, 0.8f, true },
+                                          { 20000, 60, 0.0f, false }, { 20000, 64, 0.0f, false }, { 20000, 67, 0.0f, false } },
+                                    24000);
+        std::map<int, int> firstOn;
+        for (const auto& e : run.events)
+            if (e.on && firstOn.count (e.note) == 0)
+                firstOn[e.note] = e.sampleOffset;
+        // Grace hit on the first note now; the chord notes then arrive 30 ms apart.
+        CHECK (firstOn[64] - firstOn[60] == 0 || firstOn[64] > firstOn[60]);
+        CHECK (firstOn[67] - firstOn[64] > 1200);
+        CHECK (countOns (run, 60) == 2);   // grace + real
+        CHECK (everyOnHasAnOff (run));
+    }
+    {
+        // A note shorter than the strum delay: its off must not overtake its on.
+        opxy::NoteFx fx;
+        fx.prepare (kSampleRate);
+        const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::Strum), 1.0f, true },
+                                          { 100, 36, 0.9f, true }, { 150, 36, 0.0f, false } }, 6000);
+        int lastOn = -1, lastOff = -1;
+        for (const auto& e : run.events)
+            if (e.note == 36)
+                (e.on ? lastOn : lastOff) = e.sampleOffset;
+        CHECK (lastOff > lastOn);
+        CHECK (everyOnHasAnOff (run));
+    }
+}
+
+TEST (noteFxGrooveSwingsOffBeatsAndAccentsTheBeat)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    fx.getSettings().swing.store (0.5f);   // half a 16th = 3000 samples
+    std::vector<TimedNote> input { { 0, trig (opxy::NoteFxType::Groove), 1.0f, true } };
+    for (int step = 0; step < 4; ++step)
+    {
+        input.push_back ({ step * kSixteenth, 40 + step, 0.7f, true });
+        input.push_back ({ step * kSixteenth + 1000, 40 + step, 0.0f, false });
+    }
+    const auto run = runNoteFx (fx, input, kSixteenth * 5);
+    std::map<int, opxy::NoteEvent> on;
+    for (const auto& e : run.events)
+        if (e.on)
+            on[e.note] = e;
+    const auto drift = [] (int offset, long long step) { return offset - step * kSixteenth; };
+    CHECK (drift (on[40].sampleOffset, 0) < 400);                                       // on the beat: a little drift only
+    CHECK (drift (on[41].sampleOffset, 1) >= 3000 && drift (on[41].sampleOffset, 1) < 3400);   // off-beat: swung
+    CHECK (drift (on[42].sampleOffset, 2) < 400);
+    CHECK (on[40].velocity > on[41].velocity);                                          // beat accented
     CHECK (everyOnHasAnOff (run));
 }
 

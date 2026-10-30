@@ -1,11 +1,16 @@
 #include "FxEditor.h"
+#include "../../Core/ReverseFx.h"
+#include "../../Core/GateFx.h"
+#include "../../Core/HighPassFx.h"
+#include "../../Core/PitchShiftFx.h"
 
 namespace
 {
 using opxy::FxType;
 
 constexpr int kWidth = 900;
-constexpr int kHeight = 372;
+constexpr int kHeight = 640;
+constexpr int kPerRow = 5;
 constexpr int kMargin = 16;
 constexpr int kHeaderHeight = 64;
 constexpr int kPadHeight = 86;
@@ -22,6 +27,10 @@ const char* describe (FxType type)
         case FxType::Stutter:     return "loops a short slice of the beat";
         case FxType::ReverbBurst: return "washes into a big reverb burst";
         case FxType::Bitcrush:    return "crunches into lo-fi digital grit";
+        case FxType::Reverse:     return "plays the last beat backwards";
+        case FxType::Gate:        return "chops in time, or pumps like a sidechain";
+        case FxType::HighPass:    return "drains the bass out, for build-ups";
+        case FxType::PitchShift:  return "shifts up or down, same speed";
         case FxType::Count:       break;
     }
     return "";
@@ -36,6 +45,14 @@ struct Macro
 };
 
 juce::String percent (double v) { return juce::String (juce::roundToInt (v * 100.0)) + "%"; }
+
+/** Note values in beats as musicians say them: 1/16 ... 1 bar. */
+juce::String beatsName (double beats)
+{
+    if (beats >= 4.0)
+        return "1 bar";
+    return "1/" + juce::String (juce::roundToInt (4.0 / beats));
+}
 juce::String seconds (double s) { return s < 1.0 ? juce::String (juce::roundToInt (s * 1000.0)) + " ms"
                                                  : juce::String (s, 2) + " s"; }
 
@@ -61,6 +78,21 @@ Macro macroFor (FxType type, int index)
         case FxType::Bitcrush:
             return index == 0 ? Macro { "bits",       [] (double v) { return juce::String (juce::roundToInt (16.0 - v * 13.0)) + " bit"; } }
                               : Macro { "downsample", percent };
+        case FxType::Reverse:
+            return index == 0 ? Macro { "length",     [] (double v) { return beatsName (opxy::ReverseFx::lengthBeats (static_cast<float> (v))); } }
+                              : Macro { "speed",      [] (double v) { return juce::String (0.5 + v * 1.5, 2) + "x"; } };
+        case FxType::Gate:
+            return index == 0 ? Macro { "rate",       [] (double v) { return beatsName (opxy::GateFx::divisionBeats (static_cast<float> (v))); } }
+                              : Macro { "gate>pump",  percent };
+        case FxType::HighPass:
+            return index == 0 ? Macro { "sweep to",   [] (double v) { const float hz = opxy::HighPassFx::sweepHz (static_cast<float> (v));
+                                                                       return hz < 1000.0f ? juce::String (juce::roundToInt (hz)) + " Hz"
+                                                                                           : juce::String (hz / 1000.0f, 1) + " kHz"; } }
+                              : Macro { "resonance",  percent };
+        case FxType::PitchShift:
+            return index == 0 ? Macro { "interval",   [] (double v) { const int st = opxy::PitchShiftFx::semitones (static_cast<float> (v));
+                                                                       return (st > 0 ? "+" : "") + juce::String (st) + " st"; } }
+                              : Macro { "window",     [] (double v) { return seconds (opxy::PitchShiftFx::windowSeconds (static_cast<float> (v))); } };
         case FxType::Count:
             break;
     }
@@ -161,12 +193,17 @@ void SeqQueenFxEditor::resized()
     triggerKnob.setBounds (header.removeFromRight (110).withTrimmedTop (-6));
 
     const int gap = 8;
-    const int columnWidth = (area.getWidth() - gap * (opxy::kMaxFx - 1)) / opxy::kMaxFx;
+    const int columnWidth = (area.getWidth() - gap * (kPerRow - 1)) / kPerRow;
+    const int rowHeight = kPadHeight + 8 + 2 * (kKnobSize + 10);
 
     for (int f = 0; f < opxy::kMaxFx; ++f)
     {
-        auto column = area.removeFromLeft (columnWidth);
-        area.removeFromLeft (gap);
+        if (f % kPerRow == 0 && f > 0)
+            area.removeFromTop (rowHeight + 14);
+
+        auto column = area.withTrimmedLeft ((f % kPerRow) * (columnWidth + gap))
+                          .withWidth (columnWidth)
+                          .withHeight (rowHeight);
 
         columns[f].pad->setBounds (column.removeFromTop (kPadHeight));
         column.removeFromTop (8);

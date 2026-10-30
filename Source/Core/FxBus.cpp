@@ -13,9 +13,10 @@ FxBus::FxBus()
         e.store (false);
 }
 
-void FxBus::prepare (double sampleRate, int newMaxBlockSize)
+void FxBus::prepare (double newSampleRate, int newMaxBlockSize)
 {
     maxBlockSize = clamp (newMaxBlockSize, 16, kMaxBlockSize);
+    sampleRate = newSampleRate > 0.0 ? newSampleRate : 44100.0;
     chain.prepare (sampleRate, kMaxBlockSize);
 }
 
@@ -86,6 +87,12 @@ void FxBus::process (float* left, float* right, int numSamples)
     for (int offset = 0; offset < numSamples;)
     {
         const int chunk = std::min (numSamples - offset, maxBlockSize);
+
+        TransportInfo chunkTransport = transport;
+        if (transport.bpm > 1.0)
+            chunkTransport.ppqAtBlockStart += offset / (sampleRate * 60.0 / transport.bpm);
+        chain.setTransport (chunkTransport);
+
         chain.process (left + offset, right + offset, chunk);
         offset += chunk;
     }

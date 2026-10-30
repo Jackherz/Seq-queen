@@ -11,6 +11,8 @@
 //      C  mute         C# repeat       D  fill         D# half fill
 //      E  kick+snare   F  hats         F# octave up    G  octave down
 //      G# shorten      A  random       A# skip         B  echo
+//    and four more on the next octave up:
+//      C  arp          C# chord        D  strum/flam   D# groove
 //
 //  Trigger notes are swallowed; everything else is passed through (possibly
 //  transformed), and the generators add notes on the host's 16th grid while
@@ -43,6 +45,10 @@ enum class NoteFxType : int
     Random,
     Skip,
     Echo,
+    Arp,          // appended: trigger keys are saved in users' clips, never reorder
+    Chord,
+    Strum,
+    Groove,
     Count
 };
 
@@ -70,11 +76,13 @@ public:
         std::atomic<int> kickNote   { 36 };   // notes the generators play (Drum Rack defaults)
         std::atomic<int> snareNote  { 38 };
         std::atomic<int> hatNote    { 42 };
-        std::atomic<int> repeatRate { 1 };    // 0 = 1/8, 1 = 1/16, 2 = 1/32
+        std::atomic<int> repeatRate { 1 };    // repeat + arp rate: 0 = 1/8, 1 = 1/16, 2 = 1/32
+        std::atomic<float> swing { 0.33f };   // groove: off-beat 16ths pushed by this much of a 16th
     };
 
     static constexpr int kMaxPending = 256;
     static constexpr int kPitchPool  = 8;
+    static constexpr int kMaxHeld    = 16;   // input notes the arp can cycle through
 
     NoteFx();
 
@@ -113,8 +121,22 @@ private:
     };
 
     bool held (NoteFxType type) const noexcept;
+    /** What one sounding input note was turned into. A chord makes up to three
+        output notes; a strum or groove can start them later than the input. */
+    struct Slot
+    {
+        std::int16_t notes[3] { -1, -1, -1 };   // -1 unused
+        std::int64_t onTime = 0;                 // when the (delayed) note-ons sound
+        bool active = false;                     // its note-off is still owed
+    };
+
     void handleInput (const NoteEvent& event, std::int64_t time);
     void handleTick (std::int64_t tick, std::int64_t time);
+    void releaseSlot (Slot& slot, int channel, std::int64_t time);
+    void startNote (std::int64_t time, int channel, int note, float velocity);
+    std::int64_t grooveDelay (std::int64_t time) noexcept;
+    float grooveVelocity (std::int64_t time, float velocity) noexcept;
+    double ppqAt (std::int64_t time) const noexcept;
     void schedule (std::int64_t time, int channel, int note, float velocity, bool on,
                    bool fillCandidate = false, std::int64_t boundary = -1);
     void playGenerated (std::int64_t time, int channel, int note, float velocity, std::int64_t length);
@@ -135,9 +157,21 @@ private:
     std::atomic<bool> padHeld[kNumNoteFx];
     std::atomic<bool> activeForUi[kNumNoteFx];
 
-    // What each sounding input note was turned into: -1 nothing sounding,
-    // -2 swallowed (muted/skipped/shortened, so its note-off must be too).
-    std::int16_t mapped[16][128];
+    Slot slots[16][128];
+
+    // Input notes currently held down, in the order they were pressed (the arp's
+    // material), and where the arp is in them.
+    int heldNotes[kMaxHeld] {};
+    int heldChannels[kMaxHeld] {};
+    float heldVelocities[kMaxHeld] {};
+    int numHeld = 0;
+    int arpIndex = 0;
+
+    std::int64_t lastStrumOn = -1000000;
+    int strumCount = 0;
+
+    bool ppqValid = false;             // host position known for this block
+    double blockPpq = 0.0;
 
     int pitchPool[kPitchPool] {};
     int pitchPoolSize = 0;

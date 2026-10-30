@@ -61,6 +61,17 @@ public:
     /** Processes in place. `left`/`right` must hold at least maxBlockSize samples. */
     virtual void process (float* left, float* right, int numSamples);
 
+    /** Called instead of process() while the effect is idle. Effects that replay
+        recent audio (stutter, reverse, pitch) record it here, so a punch grabs the
+        beat that just played rather than whatever was left from the last punch. */
+    virtual void listen (const float* left, const float* right, int numSamples)
+    {
+        (void) left; (void) right; (void) numSamples;
+    }
+
+    /** Host tempo and position for this block, for tempo-synced effects. */
+    virtual void setTransport (const TransportInfo& transport) { (void) transport; }
+
 protected:
     /** Called whenever engagement changes. Use for one-shot state resets. */
     virtual void onEngage (bool nowEngaged) { ignore (nowEngaged); }

@@ -50,8 +50,10 @@ public:
 
     int size() const noexcept { return kMaxFx; }
 
-    /** Runs every effect that is currently active, in place. */
+    /** Runs every effect that is currently active, in place; idle ones just listen. */
     void process (float* left, float* right, int numSamples);
+
+    void setTransport (const TransportInfo& transport);
 
 private:
     std::vector<std::unique_ptr<PunchInFx>> fx;
