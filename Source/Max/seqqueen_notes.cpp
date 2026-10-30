@@ -1,0 +1,265 @@
+// -----------------------------------------------------------------------------
+//  seqqueen.notes: the Seq Queen note punches as a Max external, for the
+//  Max for Live device that sits in front of an instrument on one track.
+//
+//  Same engine as the VST3 (opxy::NoteFx); this file only adapts Max to it:
+//
+//    inlet      raw MIDI bytes from [midiin]
+//               pad <i> <0|1>     on-screen pad latched / released
+//               kick|snare|hat <note>, rate <0-2>, swing <0-0.6>
+//    outlet     one outlet, so the patch never depends on outlet order:
+//               <int>                 raw MIDI bytes for [midiout]
+//               punch <fx> <strength> punch Seq Queen FX (0 = release); notes
+//                                     C0..A0 (24-33) are Seq Queen FX's triggers
+//               active <i> <0|1>      a note punch became active / inactive,
+//                                     for lighting the pads
+//               The patch splits them with [route punch active].
+//
+//  Timing: NoteFx counts in samples, Max in milliseconds. A 1 ms clock (one
+//  audio vector when Live runs the scheduler in audio interrupt) advances a
+//  virtual 48 kHz sample clock by the real time elapsed, and the host grid comes
+//  from Max's global transport (ITM), which follows Live. Incoming notes are
+//  processed the moment they arrive, so pass-through adds no delay.
+// -----------------------------------------------------------------------------
+
+#include "ext.h"
+#include "ext_obex.h"
+#include "ext_itm.h"
+
+#include "NoteFx.h"
+
+#include <algorithm>
+#include <cmath>
+#include <new>
+
+namespace
+{
+constexpr double kVirtualRate = 48000.0;
+constexpr int kFxFirstNote = 24;      // C0 in Live's numbering
+constexpr int kNumFxTriggers = 10;    // Seq Queen FX has ten effects
+constexpr int kMaxIn = 256;
+constexpr int kMaxOut = 1024;
+constexpr double kTicksPerQuarter = 480.0;   // ITM ticks
+} // namespace
+
+struct t_sqnotes
+{
+    t_object ob;
+    void* outlet;
+    t_clock* clock;
+
+    opxy::NoteFx* fx;
+    opxy::NoteEvent* in;
+    opxy::NoteEvent* out;
+    int numIn;
+
+    // Running-status MIDI parser for note messages.
+    int status;
+    int data[2];
+    int have;
+
+    double lastMs;
+    bool shownActive[opxy::kNumNoteFx];
+};
+
+static t_class* sqnotes_class = nullptr;
+
+static void sqnotes_step (t_sqnotes* x)
+{
+    t_itm* itm = static_cast<t_itm*> (itm_getglobal());
+    const double now = itm_gettime (itm);
+    const double elapsedMs = std::max (0.0, now - x->lastMs);
+    x->lastMs = now;
+
+    // At least one sample, so notes arriving in the same millisecond still move
+    // the engine forward (and stay in order).
+    const int numSamples = std::max (1, static_cast<int> (std::lround (elapsedMs * kVirtualRate / 1000.0)));
+
+    opxy::TransportInfo transport;
+    transport.playing = itm_getstate (itm) != 0;
+    transport.bpm = itm_gettempo (itm) > 1.0 ? itm_gettempo (itm) : 120.0;
+    transport.hasPpq = true;
+    const double ppqNow = itm_getticks (itm) / kTicksPerQuarter;
+    transport.ppqAtBlockStart = ppqNow - (elapsedMs / 1000.0) * transport.bpm / 60.0;
+
+    // Whatever arrived since the last step happened "now", at the block's end.
+    for (int i = 0; i < x->numIn; ++i)
+        x->in[i].sampleOffset = numSamples - 1;
+
+    const int count = x->fx->process (x->in, x->numIn, numSamples, transport, x->out, kMaxOut);
+    x->numIn = 0;
+
+    for (int i = 0; i < count; ++i)
+    {
+        const opxy::NoteEvent& e = x->out[i];
+        const int channel = std::max (1, std::min (16, e.channel)) - 1;
+        outlet_int (x->outlet, (e.on ? 0x90 : 0x80) | channel);
+        outlet_int (x->outlet, e.note);
+        outlet_int (x->outlet, e.on ? std::max (1, static_cast<int> (std::lround (e.velocity * 127.0f))) : 0);
+    }
+
+    for (int f = 0; f < opxy::kNumNoteFx; ++f)
+    {
+        const bool active = x->fx->isActive (f);
+        if (active != x->shownActive[f])
+        {
+            x->shownActive[f] = active;
+            t_atom atoms[2];
+            atom_setlong (atoms, f);
+            atom_setlong (atoms + 1, active ? 1 : 0);
+            outlet_anything (x->outlet, gensym ("active"), 2, atoms);
+        }
+    }
+}
+
+static void sqnotes_tick (t_sqnotes* x)
+{
+    sqnotes_step (x);
+    clock_fdelay (x->clock, 1.0);
+}
+
+static void sqnotes_note (t_sqnotes* x, int status, int note, int velocity)
+{
+    const bool on = (status & 0xF0) == 0x90 && velocity > 0;
+    const int fxIndex = note - kFxFirstNote;
+
+    if (fxIndex >= 0 && fxIndex < kNumFxTriggers)
+    {
+        t_atom atoms[2];
+        atom_setlong (atoms, fxIndex);
+        atom_setfloat (atoms + 1, on ? std::max (0.01, velocity / 127.0) : 0.0);
+        outlet_anything (x->outlet, gensym ("punch"), 2, atoms);
+        return;
+    }
+
+    if (x->numIn < kMaxIn)
+    {
+        opxy::NoteEvent& e = x->in[x->numIn++];
+        e.channel = (status & 0x0F) + 1;
+        e.note = note;
+        e.velocity = static_cast<float> (velocity) / 127.0f;
+        e.on = on;
+    }
+    sqnotes_step (x);
+}
+
+static void sqnotes_int (t_sqnotes* x, long byte)
+{
+    const int b = static_cast<int> (byte) & 0xFF;
+
+    if (b >= 0xF8)                    // realtime: pass straight through, keep parsing
+    {
+        outlet_int (x->outlet, b);
+        return;
+    }
+
+    if (b & 0x80)
+    {
+        x->status = b;
+        x->have = 0;
+        const int type = b & 0xF0;
+        if (type != 0x80 && type != 0x90)
+            outlet_int (x->outlet, b);   // not a note: pass the whole message on
+        return;
+    }
+
+    const int type = x->status & 0xF0;
+    if (type != 0x80 && type != 0x90)
+    {
+        outlet_int (x->outlet, b);
+        return;
+    }
+
+    x->data[x->have++] = b;
+    if (x->have == 2)
+    {
+        x->have = 0;                   // running status: the next pair reuses it
+        sqnotes_note (x, x->status, x->data[0], x->data[1]);
+    }
+}
+
+static void sqnotes_pad (t_sqnotes* x, long index, long held)
+{
+    x->fx->setPadHeld (static_cast<int> (index), held != 0);
+}
+
+static void sqnotes_kick (t_sqnotes* x, long note)  { x->fx->getSettings().kickNote.store (static_cast<int> (note)); }
+static void sqnotes_snare (t_sqnotes* x, long note) { x->fx->getSettings().snareNote.store (static_cast<int> (note)); }
+static void sqnotes_hat (t_sqnotes* x, long note)   { x->fx->getSettings().hatNote.store (static_cast<int> (note)); }
+static void sqnotes_rate (t_sqnotes* x, long rate)  { x->fx->getSettings().repeatRate.store (static_cast<int> (rate)); }
+static void sqnotes_swing (t_sqnotes* x, double amount)
+{
+    x->fx->getSettings().swing.store (static_cast<float> (std::max (0.0, std::min (0.6, amount))));
+}
+
+static void sqnotes_assist (t_sqnotes*, void*, long io, long index, char* text)
+{
+    (void) index;
+    if (io == ASSIST_INLET)
+        snprintf_zero (text, 256, "MIDI bytes from midiin; pad, kick, snare, hat, rate, swing");
+    else
+        snprintf_zero (text, 256, "MIDI bytes; punch <fx> <strength>; active <pad> <0/1>");
+}
+
+static void* sqnotes_new (t_symbol*, long, t_atom*)
+{
+    auto* x = static_cast<t_sqnotes*> (object_alloc (sqnotes_class));
+    if (x == nullptr)
+        return nullptr;
+
+    x->outlet = outlet_new (x, nullptr);
+
+    x->fx  = new (std::nothrow) opxy::NoteFx();
+    x->in  = new (std::nothrow) opxy::NoteEvent[kMaxIn];
+    x->out = new (std::nothrow) opxy::NoteEvent[kMaxOut];
+    if (x->fx == nullptr || x->in == nullptr || x->out == nullptr)
+    {
+        object_error (reinterpret_cast<t_object*> (x), "out of memory");
+        return x;
+    }
+
+    x->fx->prepare (kVirtualRate);
+    x->fx->getSettings().baseNote.store (0);   // C-2: the sixteen punches sit below every Drum Rack pad
+    x->numIn = 0;
+    x->status = 0;
+    x->have = 0;
+    for (auto& shown : x->shownActive)
+        shown = false;
+
+    x->lastMs = itm_gettime (static_cast<t_itm*> (itm_getglobal()));
+    x->clock = clock_new (x, reinterpret_cast<method> (sqnotes_tick));
+    clock_fdelay (x->clock, 1.0);
+    return x;
+}
+
+static void sqnotes_free (t_sqnotes* x)
+{
+    if (x->clock != nullptr)
+    {
+        clock_unset (x->clock);
+        object_free (x->clock);
+    }
+    delete x->fx;
+    delete[] x->in;
+    delete[] x->out;
+}
+
+extern "C" void ext_main (void*)
+{
+    t_class* c = class_new ("seqqueen.notes",
+                            reinterpret_cast<method> (sqnotes_new),
+                            reinterpret_cast<method> (sqnotes_free),
+                            sizeof (t_sqnotes), nullptr, A_GIMME, 0);
+
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_int),    "int",    A_LONG, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_pad),    "pad",    A_LONG, A_LONG, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_kick),   "kick",   A_LONG, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_snare),  "snare",  A_LONG, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_hat),    "hat",    A_LONG, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_rate),   "rate",   A_LONG, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_swing),  "swing",  A_FLOAT, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_assist), "assist", A_CANT, 0);
+
+    class_register (CLASS_BOX, c);
+    sqnotes_class = c;
+}

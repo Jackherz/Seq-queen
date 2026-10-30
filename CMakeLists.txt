@@ -12,6 +12,8 @@ project(SeqQueen VERSION 0.1.0 LANGUAGES C CXX)
 #    SeqQueenFX         audio effect: six punch-in FX         -> needs JUCE
 #    SeqQueenNotes      MIDI device: twelve note punches      -> needs JUCE
 #    seqqueen_snapshot  renders both editors to PNG           -> needs JUCE
+#    seqqueen_notes_max seqqueen.notes.mxo, the Max for Live device's engine
+#                                                             -> needs the Max SDK
 #
 #  The first three build with nothing but a C++17 compiler, which is why the
 #  engine can be tested on any machine before JUCE is in place.
@@ -30,6 +32,7 @@ option(OPXY_BUILD_TESTS  "Build the JUCE-free core tests" ON)
 option(OPXY_BUILD_DEMO   "Build the offline demo renderer" ON)
 option(OPXY_FETCH_JUCE   "Download JUCE via FetchContent if no local copy is supplied" ON)
 option(OPXY_UNIVERSAL_BUILD "Build a universal macOS binary (arm64 + x86_64)" OFF)
+option(OPXY_BUILD_MAX    "Build the Max external for the Max for Live device (macOS)" ON)
 
 set(OPXY_JUCE_PATH "" CACHE PATH "Path to a local JUCE 8 checkout (optional)")
 set(OPXY_JUCE_TAG "8.0.14" CACHE STRING "JUCE tag to fetch when using FetchContent")
@@ -224,6 +227,68 @@ if (OPXY_BUILD_PLUGIN)
         PUBLIC
             juce::juce_recommended_config_flags
     )
+endif()
+
+# -----------------------------------------------------------------------------
+#  Max external: seqqueen.notes.mxo, the engine of the Max for Live device
+#  (tools/m4l/ builds the .amxd that uses it). The Max SDK headers are MIT
+#  licensed and fetched; Max provides the symbols at load time.
+# -----------------------------------------------------------------------------
+if (APPLE AND OPXY_BUILD_MAX)
+    include(FetchContent)
+    FetchContent_Declare(max_sdk_base
+        GIT_REPOSITORY https://github.com/Cycling74/max-sdk-base.git
+        GIT_TAG        c03a2922a2a8ff149165a1e2ea134e9321d6e202
+        SOURCE_SUBDIR  do-not-add-subdirectory
+    )
+    FetchContent_MakeAvailable(max_sdk_base)
+
+    # Built from the core sources rather than linking opxy_core, so this one
+    # target can be universal: Live may run natively or under Rosetta.
+    get_target_property(OPXY_CORE_SOURCES opxy_core SOURCES)
+    add_library(seqqueen_notes_max MODULE Source/Max/seqqueen_notes.cpp ${OPXY_CORE_SOURCES})
+    target_include_directories(seqqueen_notes_max PRIVATE
+        Source/Core
+        "${max_sdk_base_SOURCE_DIR}/c74support/max-includes")
+
+    # Every Max API symbol is resolved by Max when it loads the external.
+    file(STRINGS "${max_sdk_base_SOURCE_DIR}/script/max-linker-flags.txt" OPXY_MAX_LINKER_FLAGS)
+    separate_arguments(OPXY_MAX_LINKER_FLAGS UNIX_COMMAND "${OPXY_MAX_LINKER_FLAGS}")
+    target_link_options(seqqueen_notes_max PRIVATE ${OPXY_MAX_LINKER_FLAGS})
+
+    set_target_properties(seqqueen_notes_max PROPERTIES
+        BUNDLE TRUE
+        BUNDLE_EXTENSION mxo
+        OUTPUT_NAME "seqqueen.notes"
+        PREFIX ""
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Source/Max/Info.plist.in"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/max"
+        OSX_ARCHITECTURES "arm64;x86_64")
+    # Puts the device in the User Library and the external + link script in a
+    # Max package, the way COPY_PLUGIN_AFTER_BUILD installs the VST3s.
+    add_custom_target(seqqueen_m4l ALL
+        COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/tools/m4l/install.sh" "$<TARGET_BUNDLE_DIR:seqqueen_notes_max>"
+        DEPENDS seqqueen_notes_max
+        COMMENT "Installing the Seq Queen Notes Max for Live device"
+        VERBATIM)
+
+    # Loads the real .mxo with a stand-in for Max (see the file's header).
+    add_executable(seqqueen_max_smoke tests/MaxExternalSmoke.cpp)
+    target_include_directories(seqqueen_max_smoke PRIVATE
+        "${max_sdk_base_SOURCE_DIR}/c74support/max-includes")
+    target_link_options(seqqueen_max_smoke PRIVATE -Wl,-export_dynamic)
+    add_dependencies(seqqueen_max_smoke seqqueen_notes_max)
+    if (OPXY_BUILD_TESTS)
+        add_test(NAME seqqueen_max_smoke
+                 COMMAND seqqueen_max_smoke "$<TARGET_BUNDLE_DIR:seqqueen_notes_max>")
+    endif()
+
+    add_custom_command(TARGET seqqueen_notes_max POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy "${max_sdk_base_SOURCE_DIR}/script/PkgInfo"
+                "$<TARGET_BUNDLE_DIR:seqqueen_notes_max>/Contents/PkgInfo"
+        VERBATIM)
 endif()
 
 # -----------------------------------------------------------------------------

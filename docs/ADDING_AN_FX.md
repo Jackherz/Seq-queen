@@ -98,10 +98,17 @@ the trigger notes extend by one (C1–F#1), so no other parameter work is needed
 
 ## 5. UI
 
-`Source/Devices/FxPlugin/FxEditor.cpp` builds one column per `kMaxFx`. Give the new
+`Source/Devices/FxPlugin/FxEditor.cpp` builds one column per `kMaxFx`, five per
+row (`kPerRow`). Give the new
 effect a one-line description in `describe()` and name its two knobs, with units, in
-`macroFor()` — every control must say what it does. Then widen `kWidth` so seven
-columns still fit, and check it with the snapshot tool (`fx.png`).
+`macroFor()` — every control must say what it does. Give it a colour in
+`ui::fxAccent()`, grow `kHeight` if it starts a new row, and check it with the
+snapshot tool (`fx.png`).
+
+The Max for Live device addresses effects by name: add the effect's display name
+to `FX` in `Source/Max/seqqueen-link.js` and raise `kNumFxTriggers` in
+`Source/Max/seqqueen_notes.cpp` (and the `route`/`live.remote~` count in
+`tools/m4l/build_device.py`).
 
 ## 6. Tests
 

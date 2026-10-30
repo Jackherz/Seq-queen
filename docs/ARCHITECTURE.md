@@ -7,7 +7,7 @@ Ableton                         Source/Devices (JUCE)            Source/Core (pl
 
 audio track ──────────────────► Seq Queen FX  ─── settings ───►  FxBus
 MIDI clip ── MIDI To ─────────►  • pads, params    (atomics)       └─ FxChain: 6 × PunchInFx
-                                 • notes C1–F1 → hold + velocity
+                                 • notes C1–A1 → hold + velocity
 
 MIDI clip ────────────────────► Seq Queen Notes ── events ────►  NoteFx
                                  • transport (ppq, bpm)            • transforms passing notes
@@ -15,15 +15,37 @@ instrument track ◄─ MIDI From ── • MIDI out                       • 
                                  • CC / bend pass straight through
 ```
 
+## One track: the Max for Live device
+
+```
+MIDI clip → [Seq Queen Notes .amxd] → [Drum Rack / synth] → [Seq Queen FX VST3]
+               │                                                  ▲
+               │ [midiin] → [seqqueen.notes] → [route punch active] ──┤ live.remote~ × 10
+               │                                 │       └→ pad lights    (each FX's Punch)
+               │                                 └→ [midiout]             ▲
+               └─ [js seqqueen-link.js]: finds Seq Queen FX on the track ─┘ (ids)
+```
+
+* `seqqueen.notes` runs the same `NoteFx` as the VST3. Notes C0–A0 don't reach it:
+  they become `punch <fx> <strength>` messages, which `live.remote~` writes into
+  that effect's *Punch* parameter (0 = release).
+* Timing: a 1 ms Max clock advances a virtual 48 kHz sample clock by the real time
+  elapsed and reads Live's transport through Max's global ITM. Incoming notes are
+  processed on arrival, so pass-through adds no delay.
+* The link script runs only when the track's devices change, never per note.
+
 ## Seq Queen FX, per block
 
-1. Read incoming MIDI: notes `trigger_note … trigger_note + 5` set a held flag and
+1. Read incoming MIDI: notes `trigger_note … trigger_note + 9` set a held flag and
    record velocity per effect; all MIDI is then cleared (it is an audio effect).
-2. For each effect, engaged = MIDI note held **or** pad held **or** `fx_*_on`
-   automation; parameters are copied into `FxSettings`.
+2. For each effect, engaged = MIDI note held **or** pad held **or** its
+   `fx_*_punch` parameter above 0 (automation, or the Max device), whose value
+   is then the strength; parameters are copied into `FxSettings`, and the host
+   transport goes to the effects (the gate locks to it).
 3. `FxBus::process` scales each wet amount by velocity
    (`amount × (1 − velamt × (1 − velocity))`), pushes macros and ramp time, and runs
-   the six-effect `FxChain` in place, chunked at `kMaxBlockSize`.
+   the ten-effect `FxChain` in place, chunked at `kMaxBlockSize`. Idle effects
+   still `listen()`, so stutter/reverse/pitch always have the latest audio.
 
 Mono tracks run the stereo chain on a preallocated scratch copy and fold back down.
 

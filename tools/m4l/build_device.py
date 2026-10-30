@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Builds "Seq Queen Notes.amxd", the one-track Max for Live MIDI effect.
+
+    python3 tools/m4l/build_device.py OUT.amxd
+
+The device goes in front of an instrument on a MIDI track:
+
+    [midiin] -> [seqqueen.notes] -> [route punch active] -> [midiout]
+                                          |         |
+             10 x [live.remote~] <- punch |         | active -> pad lights
+                     ^ ids from [js seqqueen-link.js] (finds Seq Queen FX)
+
+An .amxd is a 32-byte header ("ampf", device type, "meta", "ptch" + length)
+followed by the patcher as JSON, the same layout as Live's own
+"Max MIDI Effect.amxd" template. The external (seqqueen.notes.mxo) and the
+link script are installed into a Max package by tools/m4l/install.sh.
+"""
+
+import json
+import struct
+import sys
+
+# ------------------------------------------------------------------ layout --
+PAD_W, PAD_H, GAP = 62, 24, 4
+ROW_Y = (24, 64)
+PADS_X = 8
+SETTINGS_X = PADS_X + 8 * (PAD_W + GAP) + 10
+DEVICE_W = SETTINGS_X + 170
+
+RED = [0.88, 0.31, 0.24, 1.0]
+GREEN = [0.42, 0.82, 0.55, 1.0]
+CYAN = [0.30, 0.79, 0.85, 1.0]
+VIOLET = [0.60, 0.55, 0.91, 1.0]
+AMBER = [0.94, 0.48, 0.24, 1.0]
+
+# The sixteen punches, in NoteFxType order (trigger note = index, from C-2).
+PADS = [
+    ("Mute", RED), ("Repeat", GREEN), ("Fill", GREEN), ("Half Fill", GREEN),
+    ("Kick+Snr", GREEN), ("Hats", GREEN), ("Oct Up", CYAN), ("Oct Down", CYAN),
+    ("Shorten", VIOLET), ("Random", CYAN), ("Skip", VIOLET), ("Echo", VIOLET),
+    ("Arp", AMBER), ("Chord", AMBER), ("Strum", AMBER), ("Groove", AMBER),
+]
+NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def live_note_name(note):
+    return NOTE_NAMES[note % 12] + str(note // 12 - 2)
+
+
+# --------------------------------------------------------------- patcher --
+boxes, lines = [], []
+_next_id = [0]
+
+
+def box(maxclass, rect, presentation_rect=None, **attrs):
+    _next_id[0] += 1
+    obj_id = "obj-%d" % _next_id[0]
+    b = {"id": obj_id, "maxclass": maxclass, "patching_rect": rect}
+    if presentation_rect is not None:
+        b["presentation"] = 1
+        b["presentation_rect"] = presentation_rect
+    b.update(attrs)
+    boxes.append({"box": b})
+    return obj_id
+
+
+def newobj(text, rect, inlets, outlets, outlettype=None):
+    return box("newobj", rect, text=text, numinlets=inlets, numoutlets=outlets,
+               outlettype=outlettype if outlettype is not None else [""] * outlets,
+               fontname="Arial Bold", fontsize=10.0)
+
+
+def comment(text, rect, presentation_rect=None, size=9.0, colour=None):
+    attrs = dict(text=text, numinlets=1, numoutlets=0, fontsize=size, fontname="Ableton Sans Medium")
+    if colour is not None:
+        attrs["textcolor"] = colour
+    return box("comment", rect, presentation_rect, **attrs)
+
+
+def connect(source, outlet, destination, inlet):
+    lines.append({"patchline": {"source": [source, outlet], "destination": [destination, inlet]}})
+
+
+def parameter(longname, shortname, kind, initial, **extra):
+    values = {"parameter_longname": longname, "parameter_shortname": shortname,
+              "parameter_type": kind, "parameter_initial_enable": 1, "parameter_initial": [initial]}
+    values.update(extra)
+    return {"parameter_enable": 1, "varname": longname,
+            "saved_attribute_attributes": {"valueof": values}}
+
+
+# Core chain
+midiin = newobj("midiin", [20, 20, 45, 20], 1, 1, ["int"])
+engine = newobj("seqqueen.notes", [20, 60, 95, 20], 1, 1)
+router = newobj("route punch active", [20, 100, 110, 20], 2, 3)
+midiout = newobj("midiout", [20, 300, 50, 20], 1, 0)
+connect(midiin, 0, engine, 0)
+connect(engine, 0, router, 0)
+connect(router, 2, midiout, 0)        # everything that isn't punch/active: MIDI bytes
+
+# Seq Queen FX link: punch <fx> <strength> -> live.remote~ per effect
+this_device = box("live.thisdevice", [400, 20, 85, 20], numinlets=1, numoutlets=3,
+                  outlettype=["bang", "int", "int"])
+link = newobj("js seqqueen-link.js", [400, 60, 120, 20], 1, 11)
+connect(this_device, 0, link, 0)
+punch_route = newobj("route 0 1 2 3 4 5 6 7 8 9", [140, 140, 160, 20], 2, 11)
+connect(router, 0, punch_route, 0)
+for f in range(10):
+    remote = newobj("live.remote~ @normalized 1", [140 + f * 30, 260 + (f % 2) * 24, 140, 20], 2, 0)
+    connect(punch_route, f, remote, 0)
+    connect(link, f, remote, 1)
+
+# Pads: toggles that latch a punch; lit by the engine while the punch is active
+# from any source (note or pad).
+active_route = newobj("route " + " ".join(str(i) for i in range(16)), [700, 100, 300, 20], 2, 17)
+connect(router, 1, active_route, 0)
+for i, (name, colour) in enumerate(PADS):
+    row, col = divmod(i, 8)
+    x = PADS_X + col * (PAD_W + GAP)
+    y = ROW_Y[row]
+    pad = box("live.text", [700 + col * 70, 160 + row * 120, 60, 20], [x, y, PAD_W, PAD_H],
+              text=name, texton=name, mode=1, parameter_enable=0, fontsize=9.0,
+              numinlets=1, numoutlets=2, outlettype=["", ""],
+              activebgoncolor=colour, bgoncolor=colour)
+    comment(live_note_name(i), [700 + col * 70, 185 + row * 120, 40, 18],
+            [x, y + PAD_H + 1, PAD_W, 14], size=8.0, colour=[0.55, 0.57, 0.6, 1.0])
+    to_engine = newobj("prepend pad %d" % i, [700 + col * 70, 210 + row * 120, 70, 20], 2, 1)
+    connect(pad, 0, to_engine, 0)
+    connect(to_engine, 0, engine, 0)
+    light = newobj("prepend set", [700 + col * 70, 130 + row * 120, 70, 20], 2, 1)
+    connect(active_route, i, light, 0)
+    connect(light, 0, pad, 0)
+
+# Settings (saved with the Live set)
+settings_y = 24
+for label, longname, short, message, initial in (
+        ("Kick", "Kick Note", "Kick", "kick", 36),
+        ("Snare", "Snare Note", "Snare", "snare", 38),
+        ("Hat", "Hat Note", "Hat", "hat", 42)):
+    comment(label, [1100, settings_y + 300, 40, 18], [SETTINGS_X, settings_y, 40, 16])
+    number = box("live.numbox", [1150, settings_y + 300, 44, 15], [SETTINGS_X + 40, settings_y, 44, 15],
+                 numinlets=1, numoutlets=2, outlettype=["", "float"],
+                 **parameter(longname, short, 1, initial, parameter_mmax=127.0, parameter_unitstyle=8))
+    send = newobj("prepend " + message, [1200, settings_y + 300, 80, 20], 2, 1)
+    connect(number, 0, send, 0)
+    connect(send, 0, engine, 0)
+    connect(this_device, 0, number, 0)    # resend the saved value on load
+    settings_y += 20
+
+comment("Rate", [1100, 400, 40, 18], [SETTINGS_X, settings_y, 40, 16])
+rate = box("live.menu", [1150, 400, 50, 15], [SETTINGS_X + 40, settings_y, 50, 15],
+           numinlets=1, numoutlets=3, outlettype=["", "", "float"],
+           **parameter("Repeat Rate", "Rate", 2, 1, parameter_enum=["1/8", "1/16", "1/32"]))
+rate_send = newobj("prepend rate", [1200, 400, 80, 20], 2, 1)
+connect(rate, 0, rate_send, 0)
+connect(rate_send, 0, engine, 0)
+connect(this_device, 0, rate, 0)
+
+swing = box("live.dial", [1300, 300, 44, 48], [SETTINGS_X + 104, 22, 50, 48],
+            numinlets=1, numoutlets=2, outlettype=["", "float"],
+            **parameter("Groove Swing", "Swing", 0, 33.0, parameter_mmax=60.0, parameter_unitstyle=5))
+swing_scale = newobj("/ 100.", [1300, 360, 50, 20], 2, 1, ["float"])
+swing_send = newobj("prepend swing", [1300, 390, 80, 20], 2, 1)
+connect(swing, 0, swing_scale, 0)
+connect(swing_scale, 0, swing_send, 0)
+connect(swing_send, 0, engine, 0)
+connect(this_device, 0, swing, 0)
+
+# Words
+comment("SEQ QUEEN NOTES", [400, 400, 120, 18], [PADS_X, 4, 140, 18], size=11.0, colour=AMBER)
+comment("Hold C-2 to D#-1 in your clip, or click a pad. Green pads need Live playing.",
+        [400, 430, 400, 18], [PADS_X, 104, 8 * (PAD_W + GAP), 16], size=8.5)
+status = comment("FX: looking for Seq Queen FX...", [400, 460, 400, 18],
+                 [PADS_X, 120, 8 * (PAD_W + GAP) + 160, 16], size=8.5, colour=[0.55, 0.57, 0.6, 1.0])
+connect(link, 10, status, 0)
+
+patcher = {
+    "patcher": {
+        "fileversion": 1,
+        "appversion": {"major": 9, "minor": 1, "revision": 0, "architecture": "x64", "modernui": 1},
+        "classnamespace": "box",
+        "rect": [40.0, 80.0, 1500.0, 700.0],
+        "openrect": [0.0, 0.0, float(DEVICE_W), 169.0],
+        "openinpresentation": 1,
+        "default_fontsize": 10.0,
+        "default_fontface": 0,
+        "default_fontname": "Arial Bold",
+        "gridsize": [8.0, 8.0],
+        "devicewidth": float(DEVICE_W),
+        "description": "OP-XY style note punches. Goes in front of your instrument; "
+                       "also drives Seq Queen FX after it on the same track.",
+        "title": "Seq Queen Notes",
+        "boxes": boxes,
+        "lines": lines,
+        "dependency_cache": [],
+        "latency": 0,
+        "project": {"version": 1, "amxdtype": 1835887981, "readonly": 0,
+                    "devpathtype": 0, "devpath": ".", "sortmode": 0, "viewmode": 0},
+        "autosave": 0,
+    }
+}
+
+
+def write_amxd(path):
+    body = json.dumps(patcher, indent="\t").encode("utf-8") + b"\n\x00"
+    header = (b"ampf" + struct.pack("<I", 4) + b"mmmm"          # MIDI effect
+              + b"meta" + struct.pack("<I", 4) + b"\x00\x00\x00\x00"
+              + b"ptch" + struct.pack("<I", len(body)))
+    with open(path, "wb") as f:
+        f.write(header + body)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit("usage: build_device.py OUT.amxd")
+    write_amxd(sys.argv[1])
+    print("wrote %s (%d boxes, %d cords, %d px wide)" % (sys.argv[1], len(boxes), len(lines), DEVICE_W))

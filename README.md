@@ -4,17 +4,21 @@ OP-XY-style **punch-in effects** for Ableton, for not-quite-commercial,
 definitely-personal use. Ableton does the sequencing; Seq Queen does the punches.
 Two devices:
 
-* **Seq Queen FX** (audio effect). Six momentary effects (tape stop, delay throw,
-  filter, stutter, reverb, bitcrush) on any track or bus. Hold a pad, or play its
-  note (C1–F1) from a MIDI clip; harder notes punch harder.
-* **Seq Queen Notes** (MIDI device). Your clip plays through it on its way to your
-  Drum Rack or synth. Hold one of twelve trigger notes (C-2–B-2) to mute, roll,
-  fill, add kick/snare or hats, shift octaves, chop, randomise, thin out or echo
-  what comes out, the way the OP-XY's punch-in keys do.
+* **Seq Queen FX** (audio effect). Ten momentary effects: tape stop, delay throw,
+  filter, stutter, reverb, bitcrush, reverse, gate/pump, high-pass sweep and pitch
+  shift. Hold a pad, play its note, or let Seq Queen Notes punch it.
+* **Seq Queen Notes** (MIDI device, as Max for Live or VST3). Your clip plays
+  through it on its way to your Drum Rack or synth. Hold one of sixteen trigger
+  notes to mute, roll, fill, add kick/snare or hats, shift octaves, chop,
+  randomise, thin out, echo, arpeggiate, stack chords, strum or groove what comes
+  out, the way the OP-XY's punch-in keys do.
+
+In Live Suite they sit on **one track**: Seq Queen Notes in front of your
+instrument, Seq Queen FX after it, one clip driving both.
 
 Built with C++17 and JUCE 8.
 
-![status](https://img.shields.io/badge/core-40%20tests%20green-brightgreen)
+![status](https://img.shields.io/badge/core-50%20tests%20green-brightgreen)
 ![status](https://img.shields.io/badge/devices-auval%20%2B%20pluginval-brightgreen)
 
 > **Read this first if you are the next agent:** [`HANDOFF.md`](HANDOFF.md).
@@ -58,39 +62,58 @@ See the UI without opening a DAW:
 ./build/mac-release/seqqueen_snapshot_artefacts/Release/seqqueen_snapshot build/snap
 ```
 
-## In Ableton (Live 11/12)
+## In Ableton (Live 12 Suite): one track
 
-Rescan plug-ins (Settings → Plug-Ins) after building. Use the **VST3** versions:
-Live routes MIDI to and from VST3 plug-ins, which both devices rely on.
+The easy way. Everything lives on the track with your instrument, and one clip
+drives it all:
 
-### Seq Queen FX
+```
+[ Seq Queen Notes (Max for Live) ] → [ Drum Rack or synth ] → [ Seq Queen FX ]
+```
 
-1. Drop **Seq Queen FX** (Audio Effects) on a track or bus, e.g. your drum bus.
-2. Hold its pads while Live plays. That's it for live use.
-3. To sequence punches: make a new MIDI track, set its **MIDI To** to the FX's
-   track and then **Seq Queen FX** in the second chooser. Draw notes **C1–F1** in
-   a clip on that track: C1 tape stop, C#1 delay, D1 filter, D#1 stutter,
-   E1 reverb, F1 bitcrush. Note length = how long it punches, velocity = how hard.
+1. Rescan plug-ins after building (Settings → Plug-Ins → Rescan).
+2. From the Browser, drag **User Library → Seq Queen → Seq Queen Notes** onto a
+   MIDI track, **in front of** (to the left of) your Drum Rack or synth.
+3. Drag **Plug-Ins → Seq Queen FX** (VST3) onto the same track, **after** the
+   instrument. The Notes device's bottom line should change to
+   *"FX: linked to Seq Queen FX"*.
+4. Put your clip on that track. Hold these notes in it (or click the pads):
 
-### Seq Queen Notes
-
-1. Put **Seq Queen Notes** (Instruments) on a MIDI track and put your clip there.
-2. On the track with your Drum Rack or synth: **MIDI From** → the Notes track →
-   **Seq Queen Notes**, and **Monitor** → **In**.
-3. Hold the trigger notes in the same clip (or play them, or hold the pads):
+| Notes | What they do |
+|---|---|
+| **C-2 – D#-1** | the 16 note punches (table below), on the Notes device's pads |
+| **C0 – A0** | the 10 Seq Queen FX: tape stop, delay, filter, stutter, reverb, bitcrush, reverse, gate, high-pass, pitch. Velocity = depth |
+| everything else | plays your instrument as normal |
 
 | Note | Punch | | Note | Punch |
 |---|---|---|---|---|
-| C-2 | Mute | | F#-2 | Octave up |
-| C#-2 | Repeat (1/8, 1/16 or 1/32) | | G-2 | Octave down |
-| D-2 | Fill empty 16ths with the last hit | | G#-2 | Shorten |
-| D#-2 | Fill empty 8ths | | A-2 | Random (swaps in recent notes) |
-| E-2 | Add kick + snare | | A#-2 | Skip every other note |
-| F-2 | Add 16th hats | | B-2 | Echo an 8th later |
+| C-2 | Mute | | A-2 | Random (swaps in recent notes) |
+| C#-2 | Repeat (1/8, 1/16 or 1/32) | | A#-2 | Skip every other note |
+| D-2 | Fill empty 16ths with the last hit | | B-2 | Echo an 8th later |
+| D#-2 | Fill empty 8ths | | C-1 | Arp: held notes one at a time |
+| E-2 | Add kick + snare | | C#-1 | Chord: add a fifth + octave |
+| F-2 | Add 16th hats | | D-1 | Strum chords / flam single hits |
+| F#-2 | Octave up | | D#-1 | Groove: swing, accents, loose timing |
+| G-2 | Octave down | | | |
 
-The green pads (repeat, fills, added drums) follow Live's 16th grid, so they only
-play while the transport runs. Kick, snare and hat notes default to the Drum Rack
-pads C1, D1 and F#1 and can be changed in the device.
+Repeat, the fills, kick+snare, hats and arp follow Live's 16th grid, so they only
+play while Live is playing. Kick/snare/hat notes default to the Drum Rack pads C1,
+D1 and F#1; the Notes device has settings for them, the repeat/arp rate and swing.
+
+The Max for Live parts install with the build: the device into your User Library,
+and its engine (`seqqueen.notes.mxo`) plus link script into
+`~/Documents/Max 9/Packages/Seq Queen/`.
+
+## In any DAW: two tracks, with routing
+
+The VST3/AU devices work without Max for Live too, using MIDI routing:
+
+* **Seq Queen Notes** (Instruments) on its own MIDI track with your clip; on the
+  instrument's track set **MIDI From** → that track → *Seq Queen Notes* and
+  **Monitor → In**. Trigger notes as above (C-2 – D#-1).
+* **Seq Queen FX** (Audio Effects) on any track or bus; hold its pads, or from a
+  MIDI track set **MIDI To** → that track → *Seq Queen FX* and play **C1 – A1**
+  (its own trigger notes when used this way).
 
 ## Hear the effects
 
@@ -112,16 +135,20 @@ Source/
     PunchInFx.*        base class: momentary ramp + two mixing styles
     TapeStopFx.*  DelayThrowFx.*  FilterSweepFx.*
     StutterFx.*   ReverbBurstFx.*  BitcrushFx.*
-    FxChain.*          the six effects in one bus
+    FxChain.*          all ten effects in one bus
+    ReverseFx.* GateFx.* HighPassFx.* PitchShiftFx.*
     FxBus.*            the chain as a standalone insert       -> Seq Queen FX
-    NoteFx.*           the twelve note punches                -> Seq Queen Notes
+    NoteFx.*           the sixteen note punches               -> Seq Queen Notes
     Engine.* Sequencer.* SynthEngine.* Pattern.* PatternState.*
                        the old instrument's sequencer + synth (tests + demo only)
   Devices/
     FxPlugin/          Seq Queen FX processor + editor
     NotesPlugin/       Seq Queen Notes processor + editor
     Shared/            Theme, LookAndFeel, pads and labelled knobs
-tests/CoreTests.cpp    40 tests, no JUCE required
+  Max/               seqqueen.notes external + seqqueen-link.js (Max for Live)
+tests/CoreTests.cpp    50 tests, no JUCE required
+tests/MaxExternalSmoke.cpp  loads the real .mxo with a stand-in for Max
+tools/m4l/             builds and installs the Max for Live device
 tools/snapshot.cpp     renders both editors to PNG without a host
 tools/render_demo.cpp  offline demo renderer
 docs/                  architecture, how to add an FX
