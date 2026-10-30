@@ -1,0 +1,1813 @@
+// -----------------------------------------------------------------------------
+//  Core test suite. Runs without JUCE, without a host, without audio hardware.
+//
+//      cmake -B build -DOPXY_BUILD_TESTS=ON && cmake --build build
+//      ./build/opxy_core_tests
+//
+//  This is the safety net for the Claude handoff: any change to the engine,
+//  sequencer or FX should keep this green before touching the JUCE layer (which
+//  needs a real toolchain to build).
+// -----------------------------------------------------------------------------
+
+#include "Engine.h"
+#include "Pattern.h"
+#include "PatternState.h"
+#include "Sequencer.h"
+#include "ScalarUtils.h"
+#include "TapeStopFx.h"
+#include "DelayThrowFx.h"
+#include "FilterSweepFx.h"
+#include "StutterFx.h"
+#include "ReverbBurstFx.h"
+#include "BitcrushFx.h"
+#include "ReverseFx.h"
+#include "GateFx.h"
+#include "HighPassFx.h"
+#include "PitchShiftFx.h"
+#include "FxBus.h"
+#include "NoteFx.h"
+
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <functional>
+#include <map>
+#include <string>
+#include <vector>
+
+// ---------------------------------- harness ---------------------------------
+
+namespace
+{
+int gFailures = 0;
+int gChecks = 0;
+const char* gCurrentTest = "";
+
+void check (bool condition, const char* expression, const char* file, int line)
+{
+    ++gChecks;
+    if (! condition)
+    {
+        ++gFailures;
+        std::printf ("    FAIL [%s] %s:%d  %s\n", gCurrentTest, file, line, expression);
+    }
+}
+
+struct Test
+{
+    const char* name;
+    std::function<void()> fn;
+};
+
+std::vector<Test>& tests()
+{
+    static std::vector<Test> list;
+    return list;
+}
+
+struct Registrar
+{
+    Registrar (const char* name, std::function<void()> fn) { tests().push_back ({ name, std::move (fn) }); }
+};
+
+#define CHECK(expr)                  check ((expr), #expr, __FILE__, __LINE__)
+#define CHECK_NEAR(val, target, tol) check (std::abs ((val) - (target)) <= (tol), #val " ~= " #target, __FILE__, __LINE__)
+#define TEST(name)                                                                     \
+    static void name();                                                                \
+    static Registrar reg_##name (#name, name);                                          \
+    static void name()
+
+constexpr double kSampleRate = 48000.0;
+
+// Renders `numSamples` of a test signal through an effect in blocks of `block`.
+struct RenderReport
+{
+    double peak = 0.0;
+    double rms = 0.0;
+    double maxDelta = 0.0;
+    bool finite = true;
+};
+
+RenderReport renderFx (opxy::PunchInFx& fx,
+                       int numSamples,
+                       int block,
+                       const std::function<bool (int sampleIndex)>& engagedAt)
+{
+    RenderReport report;
+    std::vector<float> l (static_cast<std::size_t> (block)), r (static_cast<std::size_t> (block));
+    double sumSquares = 0.0;
+    float previous = 0.0f;
+    int written = 0;
+
+    for (int pos = 0; pos < numSamples; pos += block)
+    {
+        const int n = std::min (block, numSamples - pos);
+
+        for (int i = 0; i < n; ++i)
+        {
+            // 220 Hz sine at -6 dBFS.
+            const double phase = 2.0 * 3.141592653589793 * 220.0 * (pos + i) / kSampleRate;
+            const float s = static_cast<float> (0.5 * std::sin (phase));
+            l[static_cast<std::size_t> (i)] = s;
+            r[static_cast<std::size_t> (i)] = s;
+        }
+
+        fx.setEngaged (engagedAt (pos));
+        fx.process (l.data(), r.data(), n);
+
+        for (int i = 0; i < n; ++i)
+        {
+            const float v = l[static_cast<std::size_t> (i)];
+            if (! std::isfinite (v))
+                report.finite = false;
+
+            report.peak = std::max (report.peak, static_cast<double> (std::abs (v)));
+            sumSquares += static_cast<double> (v) * v;
+            if (written > 0)
+                report.maxDelta = std::max (report.maxDelta, static_cast<double> (std::abs (v - previous)));
+            previous = v;
+            ++written;
+        }
+    }
+
+    report.rms = std::sqrt (sumSquares / std::max (1, numSamples));
+    return report;
+}
+
+bool patternBit (std::uint64_t mask, int bit) { return ((mask >> bit) & 1ull) != 0ull; }
+
+} // namespace
+
+// ------------------------------- sequencer tests -----------------------------
+
+TEST (euclideanMaskMatchesClassicPatterns)
+{
+    // 4-in-16 is the four-on-the-floor.
+    const auto four = opxy::euclideanMask (16, 4, 0);
+    for (int i = 0; i < 16; ++i)
+        CHECK (patternBit (four, i) == (i % 4 == 0));
+
+    // 3-in-8 is the classic tresillo: steps 0, 3, 6.
+    const auto tresillo = opxy::euclideanMask (8, 3, 0);
+    CHECK (patternBit (tresillo, 0));
+    CHECK (patternBit (tresillo, 3));
+    CHECK (patternBit (tresillo, 6));
+    CHECK (! patternBit (tresillo, 1));
+
+    // Extremes.
+    CHECK (opxy::euclideanMask (16, 0, 0) == 0ull);
+    CHECK (opxy::euclideanMask (16, 16, 0) == 0xFFFFull);
+    CHECK (opxy::euclideanMask (16, 4, 1) == (four << 1));
+}
+
+TEST (quantiseToScaleSnapsToNearestDegree)
+{
+    using opxy::ScaleType;
+    const int major = static_cast<int> (ScaleType::Major);
+    const int minor = static_cast<int> (ScaleType::Minor);
+
+    // C# is not in C major: should snap to C or D.
+    const int snapped = opxy::quantiseToScale (61, 0, major);
+    CHECK (snapped == 60 || snapped == 62);
+
+    // Eb in C minor is already a degree.
+    CHECK (opxy::quantiseToScale (63, 0, minor) == 62 || opxy::quantiseToScale (63, 0, minor) == 63);
+
+    // Off leaves things alone.
+    CHECK (opxy::quantiseToScale (61, 0, static_cast<int> (ScaleType::Off)) == 61);
+
+    // Everything snapped to a pentatonic stays inside the pentatonic.
+    const int pentatonic = static_cast<int> (ScaleType::Pentatonic);
+    static constexpr int allowed[] = { 0, 2, 4, 7, 9 };
+    for (int note = 48; note < 72; ++note)
+    {
+        const int q = opxy::quantiseToScale (note, 0, pentatonic);
+        bool found = false;
+        for (int a : allowed)
+            if (((q % 12) + 12) % 12 == a)
+                found = true;
+        CHECK (found);
+    }
+}
+
+TEST (plocksSetGetClear)
+{
+    opxy::Step step;
+    CHECK (! step.hasAnyPLock());
+    CHECK_NEAR (step.getPLock (opxy::PlockParam::Cutoff, 1234.0f), 1234.0f, 0.001f);
+
+    step.setPLock (opxy::PlockParam::Cutoff, 800.0f);
+    CHECK (step.hasPLock (opxy::PlockParam::Cutoff));
+    CHECK_NEAR (step.getPLock (opxy::PlockParam::Cutoff, 1234.0f), 800.0f, 0.001f);
+    CHECK (! step.hasPLock (opxy::PlockParam::Pitch));
+
+    step.clearPLock (opxy::PlockParam::Cutoff);
+    CHECK (! step.hasPLock (opxy::PlockParam::Cutoff));
+    CHECK_NEAR (step.getPLock (opxy::PlockParam::Cutoff, 1234.0f), 1234.0f, 0.001f);
+}
+
+TEST (sequencerFiresSixteenStepsPerBar)
+{
+    opxy::Pattern pattern;
+    pattern.tracks[0].length.store (16);
+    for (auto& s : pattern.tracks[0].steps)
+        s.active.store (true);
+    for (int t = 1; t < opxy::kMaxTracks; ++t)
+        pattern.tracks[t].length.store (1); // keep the other tracks quiet
+
+    opxy::Sequencer seq;
+    seq.prepare (kSampleRate);
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    const int blockSize = 512;
+    const int totalSamples = static_cast<int> (kSampleRate * 2.0); // 2 s = 1 bar at 120 bpm
+    std::vector<opxy::StepEvent> events (opxy::kMaxEventsPerBlock);
+    std::vector<int> track0Offsets;
+
+    int samplePos = 0;
+    float peak = 0.0f;
+    (void) peak;
+    while (samplePos < totalSamples)
+    {
+        const int n = std::min (blockSize, totalSamples - samplePos);
+        const int count = seq.process (pattern, transport, n, events.data(), opxy::kMaxEventsPerBlock);
+        for (int i = 0; i < count; ++i)
+            if (events[static_cast<std::size_t> (i)].track == 0)
+                track0Offsets.push_back (samplePos + events[static_cast<std::size_t> (i)].sampleOffset);
+        samplePos += n;
+    }
+
+    // One bar of 16ths at 120 bpm starting at sample 0: 16 hits, one per 6000 samples.
+    CHECK (track0Offsets.size() >= 15);
+    CHECK (track0Offsets.size() <= 17);
+
+    if (track0Offsets.size() >= 2)
+    {
+        CHECK_NEAR (track0Offsets[0], 0, 1);
+        CHECK_NEAR (track0Offsets[1] - track0Offsets[0], 6000, 2);
+    }
+}
+
+TEST (sequencerRespectsTrackLengthForPolyrhythms)
+{
+    opxy::Pattern pattern;
+    for (int t = 0; t < opxy::kMaxTracks; ++t)
+    {
+        pattern.tracks[t].length.store (t == 0 ? 16 : 7);
+        for (auto& s : pattern.tracks[t].steps)
+            s.active.store (false);
+    }
+
+    // Track 0 fires every step; track 1 only on its step 0 (a 7-step cycle).
+    for (auto& s : pattern.tracks[0].steps)
+        s.active.store (true);
+    pattern.tracks[1].steps[0].active.store (true);
+
+    opxy::Sequencer seq;
+    seq.prepare (kSampleRate);
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    std::vector<opxy::StepEvent> events (opxy::kMaxEventsPerBlock);
+    int track0Count = 0, track1Count = 0;
+    int samplePos = 0;
+    const int totalSamples = static_cast<int> (kSampleRate * 4.0); // 32 sixteenths
+
+    while (samplePos < totalSamples)
+    {
+        const int n = std::min (256, totalSamples - samplePos);
+        const int count = seq.process (pattern, transport, n, events.data(), opxy::kMaxEventsPerBlock);
+        for (int i = 0; i < count; ++i)
+        {
+            if (events[static_cast<std::size_t> (i)].track == 0) ++track0Count;
+            if (events[static_cast<std::size_t> (i)].track == 1) ++track1Count;
+        }
+        samplePos += n;
+    }
+
+    CHECK (track0Count >= 31);
+    CHECK (track1Count >= 4);   // 32 steps / 7 = 4 or 5 hits
+    CHECK (track1Count <= 6);
+    CHECK (track1Count * 2 < track0Count);
+}
+
+TEST (probabilityZeroNeverFiresAndOneAlwaysDoes)
+{
+    opxy::Pattern pattern;
+    for (auto& s : pattern.tracks[0].steps)
+        s.active.store (true);
+    for (int t = 1; t < opxy::kMaxTracks; ++t)
+        pattern.tracks[t].length.store (1);
+
+    opxy::Sequencer seq;
+    seq.prepare (kSampleRate);
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    std::vector<opxy::StepEvent> events (opxy::kMaxEventsPerBlock);
+
+    pattern.tracks[0].probability.store (0.0f);
+    seq.reset();
+    int count = 0;
+    for (int i = 0; i < 40; ++i)
+        count += seq.process (pattern, transport, 512, events.data(), opxy::kMaxEventsPerBlock);
+    CHECK (count == 0);
+
+    pattern.tracks[0].probability.store (1.0f);
+    seq.reset();
+    count = 0;
+    for (int i = 0; i < 40; ++i)
+        count += seq.process (pattern, transport, 512, events.data(), opxy::kMaxEventsPerBlock);
+    CHECK (count > 0);
+}
+
+TEST (ratchetSubdividesAStep)
+{
+    opxy::Pattern pattern;
+    for (auto& s : pattern.tracks[0].steps)
+        s.active.store (false);
+    pattern.tracks[0].steps[0].active.store (true);
+    pattern.tracks[0].steps[0].ratchet.store (4);
+    pattern.tracks[0].length.store (16);
+    for (int t = 1; t < opxy::kMaxTracks; ++t)
+        pattern.tracks[t].length.store (1);
+
+    opxy::Sequencer seq;
+    seq.prepare (kSampleRate);
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    std::vector<opxy::StepEvent> events (opxy::kMaxEventsPerBlock);
+    std::vector<int> offsets;
+    int samplePos = 0;
+    while (samplePos < 12000) // 2 steps
+    {
+        const int n = std::min (128, 12000 - samplePos);
+        const int count = seq.process (pattern, transport, n, events.data(), opxy::kMaxEventsPerBlock);
+        for (int i = 0; i < count; ++i)
+            if (events[static_cast<std::size_t> (i)].track == 0)
+                offsets.push_back (samplePos + events[static_cast<std::size_t> (i)].sampleOffset);
+        samplePos += n;
+    }
+
+    // 4 sub-hits inside the first 6000-sample step, spaced 1500 apart.
+    CHECK (offsets.size() == 4);
+    if (offsets.size() == 4)
+    {
+        CHECK_NEAR (offsets[0], 0, 1);
+        CHECK_NEAR (offsets[1] - offsets[0], 1500, 2);
+        CHECK_NEAR (offsets[2] - offsets[1], 1500, 2);
+        CHECK_NEAR (offsets[3] - offsets[2], 1500, 2);
+    }
+}
+
+TEST (swingDelaysOddSteps)
+{
+    opxy::Pattern pattern;
+    for (auto& s : pattern.tracks[0].steps)
+        s.active.store (true);
+    for (int t = 1; t < opxy::kMaxTracks; ++t)
+        pattern.tracks[t].length.store (1);
+
+    opxy::Sequencer seq;
+    seq.prepare (kSampleRate);
+    seq.setSwing (1.0f);
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    std::vector<opxy::StepEvent> events (opxy::kMaxEventsPerBlock);
+    std::vector<int> offsets;
+    int samplePos = 0;
+    while (samplePos < 12000)
+    {
+        const int n = std::min (256, 12000 - samplePos);
+        const int count = seq.process (pattern, transport, n, events.data(), opxy::kMaxEventsPerBlock);
+        for (int i = 0; i < count; ++i)
+            if (events[static_cast<std::size_t> (i)].track == 0)
+                offsets.push_back (samplePos + events[static_cast<std::size_t> (i)].sampleOffset);
+        samplePos += n;
+    }
+
+    CHECK (offsets.size() == 2);
+    if (offsets.size() == 2)
+    {
+        CHECK_NEAR (offsets[0], 0, 1);
+        CHECK_NEAR (offsets[1] - offsets[0], 9000, 4); // 6000 + 0.5 * 6000
+    }
+}
+
+TEST (nudgeAppliesMicroTiming)
+{
+    opxy::Pattern pattern;
+    for (auto& s : pattern.tracks[0].steps)
+        s.active.store (false);
+    pattern.tracks[0].steps[0].active.store (true);
+    pattern.tracks[0].steps[0].nudge.store (0.25f); // quarter step late = 1500 samples
+    for (int t = 1; t < opxy::kMaxTracks; ++t)
+        pattern.tracks[t].length.store (1);
+
+    opxy::Sequencer seq;
+    seq.prepare (kSampleRate);
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    std::vector<opxy::StepEvent> events (opxy::kMaxEventsPerBlock);
+    int firstOffset = -1;
+    int samplePos = 0;
+    while (samplePos < 12000 && firstOffset < 0)
+    {
+        const int n = std::min (128, 12000 - samplePos);
+        const int count = seq.process (pattern, transport, n, events.data(), opxy::kMaxEventsPerBlock);
+        for (int i = 0; i < count; ++i)
+            if (events[static_cast<std::size_t> (i)].track == 0 && firstOffset < 0)
+                firstOffset = samplePos + events[static_cast<std::size_t> (i)].sampleOffset;
+        samplePos += n;
+    }
+
+    CHECK (firstOffset > 0);
+    CHECK_NEAR (firstOffset, 1500, 2);
+}
+
+TEST (engineRendersAudioWithoutBlowingUp)
+{
+    opxy::Engine engine;
+    engine.prepare (kSampleRate, 512);
+
+    for (auto& s : engine.getPattern().tracks[0].steps)
+        s.active.store (true);
+    for (int t = 1; t < opxy::kMaxTracks; ++t)
+        engine.getPattern().tracks[t].length.store (1);
+
+    std::vector<float> l (512, 0.0f), r (512, 0.0f);
+    float* channels[2] = { l.data(), r.data() };
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    double peak = 0.0;
+    bool finite = true;
+
+    for (int block = 0; block < 200; ++block)
+    {
+        std::fill (l.begin(), l.end(), 0.0f);
+        std::fill (r.begin(), r.end(), 0.0f);
+        engine.process (channels, 2, 512, transport);
+        for (int i = 0; i < 512; ++i)
+        {
+            if (! std::isfinite (l[static_cast<std::size_t> (i)]))
+                finite = false;
+            peak = std::max (peak, static_cast<double> (std::abs (l[static_cast<std::size_t> (i)])));
+        }
+    }
+
+    CHECK (finite);
+    CHECK (peak > 0.001);    // it actually made sound
+    CHECK (peak < 2.0);      // and did not blow up
+    CHECK (engine.getLastEventCount() > 0);
+}
+
+TEST (engineHandlesOversizedBlocksAndAllVoicesAreCapped)
+{
+    opxy::Engine engine;
+    engine.prepare (kSampleRate, 512);
+
+    // Hammer every track with fast 64th-ish notes to force voice stealing.
+    for (int t = 0; t < opxy::kMaxTracks; ++t)
+    {
+        engine.getPattern().tracks[t].length.store (16);
+        for (auto& s : engine.getPattern().tracks[t].steps)
+        {
+            s.active.store (true);
+            s.gate.store (0.1f);
+            s.ratchet.store (8);
+        }
+    }
+
+    const int blockSize = 4096; // deliberately larger than the prepared size
+    std::vector<float> l (static_cast<std::size_t> (blockSize), 0.0f);
+    std::vector<float> r (static_cast<std::size_t> (blockSize), 0.0f);
+    float* channels[2] = { l.data(), r.data() };
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 140.0;
+
+    for (int block = 0; block < 20; ++block)
+    {
+        std::fill (l.begin(), l.end(), 0.0f);
+        std::fill (r.begin(), r.end(), 0.0f);
+        engine.process (channels, 2, blockSize, transport);
+        for (int i = 0; i < blockSize; ++i)
+            CHECK (std::isfinite (l[static_cast<std::size_t> (i)]));
+    }
+}
+
+TEST (playNoteProducesSoundWithoutSequencer)
+{
+    opxy::Engine engine;
+    engine.prepare (kSampleRate, 256);
+
+    // Transport stopped: nothing from the sequencer, only the played note.
+    opxy::TransportInfo stopped;
+    stopped.playing = false;
+
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    float* channels[2] = { l.data(), r.data() };
+
+    engine.playNote (0, 60, 0.9f);
+
+    double peak = 0.0;
+    for (int block = 0; block < 20; ++block)
+    {
+        std::fill (l.begin(), l.end(), 0.0f);
+        std::fill (r.begin(), r.end(), 0.0f);
+        engine.process (channels, 2, 256, stopped);
+        for (int i = 0; i < 256; ++i)
+            peak = std::max (peak, static_cast<double> (std::abs (l[static_cast<std::size_t> (i)])));
+    }
+    CHECK (peak > 0.001);
+    CHECK (peak < 1.5);
+}
+
+TEST (engineStopsMakingSoundWhenStopped)
+{
+    opxy::Engine engine;
+    engine.prepare (kSampleRate, 256);
+
+    for (auto& s : engine.getPattern().tracks[0].steps)
+        s.active.store (true);
+    engine.getPattern().tracks[0].decay.store (0.05f);
+
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    float* channels[2] = { l.data(), r.data() };
+
+    opxy::TransportInfo playing;
+    playing.playing = true;
+    playing.bpm = 120.0;
+
+    for (int block = 0; block < 40; ++block)
+    {
+        std::fill (l.begin(), l.end(), 0.0f);
+        std::fill (r.begin(), r.end(), 0.0f);
+        engine.process (channels, 2, 256, playing);
+    }
+
+    opxy::TransportInfo stopped;
+    stopped.playing = false;
+
+    double peak = 0.0;
+    for (int block = 0; block < 200; ++block) // ~1 s of tails then silence
+    {
+        std::fill (l.begin(), l.end(), 0.0f);
+        std::fill (r.begin(), r.end(), 0.0f);
+        engine.process (channels, 2, 256, stopped);
+        for (int i = 0; i < 256; ++i)
+            peak = std::max (peak, static_cast<double> (std::abs (l[static_cast<std::size_t> (i)])));
+    }
+
+    CHECK (peak < 0.01);
+}
+
+TEST (stepsSurviveSerialisationRoundTrip)
+{
+    opxy::Pattern original;
+    original.tracks[2].steps[5].active.store (true);
+    original.tracks[2].steps[5].note.store (43.0f);
+    original.tracks[2].steps[5].velocity.store (0.42f);
+    original.tracks[2].steps[5].gate.store (0.75f);
+    original.tracks[2].steps[5].ratchet.store (3);
+    original.tracks[2].steps[5].nudge.store (-0.125f);
+    original.tracks[2].steps[5].setPLock (opxy::PlockParam::Cutoff, 640.0f);
+    original.tracks[2].steps[5].setPLock (opxy::PlockParam::Resonance, 0.73f);
+
+    original.tracks[7].steps[63].active.store (true);
+    original.tracks[7].steps[63].note.store (96.0f);
+
+    const std::string blob = opxy::serialiseSteps (original);
+    CHECK (blob.rfind ("opxy-steps v2", 0) == 0);
+
+    opxy::Pattern restored;
+    CHECK (opxy::deserialiseSteps (blob, restored));
+
+    const auto& step = restored.tracks[2].steps[5];
+    CHECK (step.active.load());
+    CHECK_NEAR (step.note.load(), 43.0f, 0.001f);
+    CHECK_NEAR (step.velocity.load(), 0.42f, 0.001f);
+    CHECK_NEAR (step.gate.load(), 0.75f, 0.001f);
+    CHECK (step.ratchet.load() == 3);
+    CHECK_NEAR (step.nudge.load(), -0.125f, 0.001f);
+    CHECK_NEAR (step.getPLock (opxy::PlockParam::Cutoff, 0.0f), 640.0f, 0.5f);
+    CHECK_NEAR (step.getPLock (opxy::PlockParam::Resonance, 0.0f), 0.73f, 0.001f);
+    CHECK (! step.hasPLock (opxy::PlockParam::Pitch));
+
+    CHECK (restored.tracks[7].steps[63].active.load());
+    // Untouched steps stay silent.
+    CHECK (! restored.tracks[0].steps[0].active.load());
+    CHECK (! restored.tracks[2].steps[6].active.load());
+
+    // ----- punch-FX lanes -------------------------------------------------
+    original.setFxLaneEnabled (static_cast<int> (opxy::FxType::Stutter), true);
+    original.setFxLaneStep (static_cast<int> (opxy::FxType::Stutter), 0, 1.0f);
+    original.setFxLaneStep (static_cast<int> (opxy::FxType::Stutter), 2, 0.4f);
+    original.fxLaneSteps.store (16);
+
+    const std::string laneBlob = opxy::serialiseSteps (original);
+    opxy::Pattern laneRestored;
+    CHECK (opxy::deserialiseSteps (laneBlob, laneRestored));
+
+    const int stutter = static_cast<int> (opxy::FxType::Stutter);
+    CHECK (laneRestored.isFxLaneEnabled (stutter));
+    CHECK_NEAR (laneRestored.getFxLaneStep (stutter, 0), 1.0f, 0.001f);
+    CHECK_NEAR (laneRestored.getFxLaneStep (stutter, 2), 0.4f, 0.001f);
+    CHECK_NEAR (laneRestored.getFxLaneStep (stutter, 1), 0.0f, 0.001f);
+    CHECK (laneRestored.getLaneLength() == 16);
+
+    // A v1 blob (steps only) still loads and leaves the lanes empty.
+    const std::string v1Blob =
+        "opxy-steps v1\n"
+        "t1 s2 a=1 n=48 v=0.5 g=0.5 r=1 d=0\n"
+        "x3 s0 v=1\n";   // should be ignored: v1 has no lanes
+    opxy::Pattern fromV1;
+    CHECK (opxy::deserialiseSteps (v1Blob, fromV1));
+    CHECK (fromV1.tracks[1].steps[2].active.load());
+    CHECK (! fromV1.isFxLaneEnabled (3));
+    CHECK_NEAR (fromV1.getFxLaneStep (3, 0), 0.0f, 0.001f);
+
+    // Round-tripping twice is stable.
+    const std::string blob2 = opxy::serialiseSteps (restored);
+    CHECK (blob == blob2);
+
+    // Garbage input is rejected without crashing.
+    opxy::Pattern junk;
+    CHECK (! opxy::deserialiseSteps ("nonsense", junk));
+    CHECK (! opxy::deserialiseSteps ("", junk));
+}
+
+TEST (fxLaneDrivesEngagementOnTheGrid)
+{
+    opxy::Engine engine;
+    engine.prepare (kSampleRate, 256);
+    engine.getPattern().tracks[0].length.store (16);
+    for (int t = 1; t < opxy::kMaxTracks; ++t)
+        engine.getPattern().tracks[t].length.store (1);
+
+    const int stutter = static_cast<int> (opxy::FxType::Stutter);
+
+    // Lane off: never engaged, whatever the steps say.
+    engine.getPattern().setFxLaneStep (stutter, 0, 1.0f);
+    engine.getPattern().setFxLaneStep (stutter, 2, 1.0f);
+
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    float* channels[2] = { l.data(), r.data() };
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    for (int i = 0; i < 20; ++i)
+    {
+        engine.process (channels, 2, 256, transport);
+        CHECK (! engine.isFxEngaged (stutter));
+        CHECK_NEAR (engine.getEffectiveAmount (stutter), 0.0f, 0.001f);
+    }
+
+    // Lane on: engaged on steps 0 and 2, released on step 1.
+    engine.getPattern().setFxLaneEnabled (stutter, true);
+    engine.reset();
+
+    // 120 bpm -> one 16th = 6000 samples. Step 0 spans 0..5999.
+    engine.process (channels, 2, 256, transport);
+    CHECK (engine.isFxEngaged (stutter));
+    CHECK (engine.getEffectiveAmount (stutter) > 0.5f);
+
+    // Advance to step 1 (6000..11999): lane value 0 -> release.
+    bool sawRelease = false;
+    for (int i = 0; i < 40; ++i)
+    {
+        engine.process (channels, 2, 256, transport);
+        if (! engine.isFxEngaged (stutter))
+            sawRelease = true;
+    }
+    CHECK (sawRelease);
+
+    // Step 2 (12000..17999): engaged again.
+    bool sawPunchAgain = false;
+    for (int i = 0; i < 60; ++i)
+    {
+        engine.process (channels, 2, 256, transport);
+        if (engine.isFxEngaged (stutter))
+            sawPunchAgain = true;
+    }
+    CHECK (sawPunchAgain);
+}
+
+TEST (fxLaneIsSilentWhenTransportStops)
+{
+    opxy::Engine engine;
+    engine.prepare (kSampleRate, 256);
+
+    const int crush = static_cast<int> (opxy::FxType::Bitcrush);
+    engine.getPattern().setFxLaneStep (crush, 0, 1.0f);
+    engine.getPattern().setFxLaneEnabled (crush, true);
+
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    float* channels[2] = { l.data(), r.data() };
+
+    opxy::TransportInfo stopped;
+    stopped.playing = false;
+
+    for (int i = 0; i < 10; ++i)
+    {
+        engine.process (channels, 2, 256, stopped);
+        CHECK (! engine.isFxEngaged (crush));
+    }
+}
+
+TEST (fxLaneAmountSetsWetLevel)
+{
+    opxy::Engine engine;
+    engine.prepare (kSampleRate, 256);
+
+    const int filter = static_cast<int> (opxy::FxType::FilterSweep);
+    engine.getPattern().setFxLaneEnabled (filter, true);
+    engine.getPattern().setFxLaneStep (filter, 0, 0.25f);
+
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    float* channels[2] = { l.data(), r.data() };
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    engine.process (channels, 2, 256, transport);
+    // The lane value becomes the wet amount for that step.
+    CHECK_NEAR (engine.getEffectiveAmount (filter), 0.25f, 0.01f);
+}
+
+TEST (punchVelocityScalesTheWetAmount)
+{
+    opxy::Engine engine;
+    engine.prepare (kSampleRate, 256);
+
+    const int crush = static_cast<int> (opxy::FxType::Bitcrush);
+    auto& settings = engine.getFxSettings (crush);
+    settings.amount.store (1.0f);
+    settings.velocitySensitivity.store (1.0f);   // fully velocity sensitive
+    settings.engaged.store (true);
+
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    float* channels[2] = { l.data(), r.data() };
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    // Hard hit = full amount.
+    engine.setPunchVelocity (crush, 1.0f);
+    engine.process (channels, 2, 256, transport);
+    CHECK_NEAR (engine.getEffectiveAmount (crush), 1.0f, 0.01f);
+
+    // Soft hit = proportionally less.
+    engine.setPunchVelocity (crush, 0.3f);
+    engine.process (channels, 2, 256, transport);
+    CHECK_NEAR (engine.getEffectiveAmount (crush), 0.3f, 0.01f);
+
+    // Sensitivity 0 ignores velocity again.
+    settings.velocitySensitivity.store (0.0f);
+    engine.setPunchVelocity (crush, 0.1f);
+    engine.process (channels, 2, 256, transport);
+    CHECK_NEAR (engine.getEffectiveAmount (crush), 1.0f, 0.01f);
+
+    // Released = 0, regardless of velocity.
+    settings.engaged.store (false);
+    engine.process (channels, 2, 256, transport);
+    CHECK_NEAR (engine.getEffectiveAmount (crush), 0.0f, 0.001f);
+}
+
+TEST (softHitIsAudiblyGentlerThanHardHit)
+{
+    // End-to-end on real audio: a soft punch must move the signal less than a
+    // hard one. Measured as deviation from the un-punched signal, which is
+    // robust for any effect type (energy is a bad proxy: a low-pass barely
+    // changes the energy of a bass note).
+    const auto renderAndCompare = [] (bool engage, float velocity)
+    {
+        opxy::Engine engine;
+        engine.prepare (kSampleRate, 256);
+        engine.getPattern().tracks[0].length.store (16);
+        for (auto& step : engine.getPattern().tracks[0].steps)
+            step.active.store (true);
+        for (int t = 1; t < opxy::kMaxTracks; ++t)
+            engine.getPattern().tracks[t].length.store (1);
+
+        const int crush = static_cast<int> (opxy::FxType::Bitcrush);
+        auto& settings = engine.getFxSettings (crush);
+        settings.amount.store (1.0f);
+        settings.paramA.store (0.9f);
+        settings.paramB.store (0.8f);
+        settings.velocitySensitivity.store (1.0f);
+        settings.engaged.store (engage);
+        engine.setPunchVelocity (crush, velocity);
+
+        std::vector<float> l (256, 0.0f), r (256, 0.0f);
+        float* channels[2] = { l.data(), r.data() };
+
+        opxy::TransportInfo transport;
+        transport.playing = true;
+        transport.bpm = 120.0;
+
+        std::vector<float> captured;
+        captured.reserve (256 * 180);
+
+        for (int block = 0; block < 180; ++block)
+        {
+            std::fill (l.begin(), l.end(), 0.0f);
+            std::fill (r.begin(), r.end(), 0.0f);
+            engine.process (channels, 2, 256, transport);
+            if (block > 20)
+                captured.insert (captured.end(), l.begin(), l.end());
+        }
+        return captured;
+    };
+
+    const auto dry = renderAndCompare (false, 1.0f);
+    const auto hard = renderAndCompare (true, 1.0f);
+    const auto soft = renderAndCompare (true, 0.15f);
+
+    CHECK (dry.size() == hard.size());
+    CHECK (dry.size() == soft.size());
+
+    const auto deviation = [] (const std::vector<float>& a, const std::vector<float>& b)
+    {
+        double sum = 0.0;
+        for (std::size_t i = 0; i < a.size(); ++i)
+        {
+            const double difference = static_cast<double> (a[i]) - static_cast<double> (b[i]);
+            sum += difference * difference;
+        }
+        return sum / std::max<std::size_t> (1, a.size());
+    };
+
+    const double hardDeviation = deviation (hard, dry);
+    const double softDeviation = deviation (soft, dry);
+
+    CHECK (hardDeviation > 1.0e-8);            // the punch is doing something
+    CHECK (softDeviation < hardDeviation * 0.5); // and a soft hit does much less
+}
+
+// --------------------------------- FX tests --------------------------------
+
+TEST (tapeStopRampsRateAndFreezes)
+{
+    opxy::TapeStopFx fx;
+    fx.prepare (kSampleRate, 512);
+    fx.setPunchParam (0, 0.2f); // short stop time
+
+    const auto report = renderFx (fx, static_cast<int> (kSampleRate * 1.0), 512,
+                                  [] (int i) { return i < static_cast<int> (kSampleRate * 0.5); });
+
+    CHECK (report.finite);
+    CHECK (report.peak < 1.5);
+    CHECK (fx.isActive() == false); // disengaged long enough for the ramp to finish
+}
+
+TEST (punchInEffectsDoNotClickWhenEngagedAndReleased)
+{
+    const auto runOne = [] (opxy::PunchInFx& fx)
+    {
+        fx.prepare (kSampleRate, 256);
+        const int engageAt = static_cast<int> (kSampleRate * 0.25);
+        const int releaseAt = static_cast<int> (kSampleRate * 0.75);
+        const auto report = renderFx (fx, static_cast<int> (kSampleRate * 1.6), 256,
+                                      [engageAt, releaseAt] (int i) { return i >= engageAt && i < releaseAt; });
+        std::printf ("       %-12s peak %.3f  maxDelta %.4f  rms %.3f\n",
+                     fx.getName(), report.peak, report.maxDelta, report.rms);
+        CHECK (report.finite);
+        check (report.peak < 2.0, "peak < 2.0", __FILE__, __LINE__);
+        // A 220 Hz sine at 0.5 amplitude moves ~0.014 per sample; anything above
+        // 0.3 would be an audible click at the engage/release boundary.
+        check (report.maxDelta < 0.30, "maxDelta < 0.30 (click free)", __FILE__, __LINE__);
+        return report;
+    };
+
+    {
+        opxy::TapeStopFx fx;
+        runOne (fx);
+    }
+    {
+        opxy::DelayThrowFx fx;
+        runOne (fx);
+    }
+    {
+        opxy::FilterSweepFx fx;
+        runOne (fx);
+    }
+    {
+        opxy::StutterFx fx;
+        runOne (fx);
+    }
+    {
+        opxy::ReverbBurstFx fx;
+        runOne (fx);
+    }
+    {
+        opxy::BitcrushFx fx;
+        runOne (fx);
+    }
+    {
+        opxy::ReverseFx fx;
+        runOne (fx);
+    }
+    {
+        opxy::GateFx fx;
+        runOne (fx);
+    }
+    {
+        opxy::HighPassFx fx;
+        runOne (fx);
+    }
+    {
+        opxy::PitchShiftFx fx;
+        runOne (fx);
+    }
+}
+
+TEST (delayThrowKeepsTailingAfterRelease)
+{
+    opxy::DelayThrowFx fx;
+    fx.prepare (kSampleRate, 256);
+    fx.setPunchParam (0, 0.2f);   // ~200 ms
+    fx.setPunchParam (1, 0.6f);   // feedback
+
+    fx.setEngaged (true);
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    for (int i = 0; i < 40; ++i) // ~200 ms of audio in
+    {
+        for (int s = 0; s < 256; ++s)
+        {
+            const float v = 0.5f * static_cast<float> (std::sin (2.0 * 3.14159265 * 220.0 * (i * 256 + s) / kSampleRate));
+            l[static_cast<std::size_t> (s)] = v;
+            r[static_cast<std::size_t> (s)] = v;
+        }
+        fx.process (l.data(), r.data(), 256);
+    }
+
+    fx.setEngaged (false);
+
+    // Immediately after release the effect must still be active (tail alive)...
+    CHECK (fx.isActive());
+
+    // ...and it must decay to silence in the end.
+    for (int i = 0; i < 800; ++i) // ~4 s of silence
+    {
+        std::fill (l.begin(), l.end(), 0.0f);
+        std::fill (r.begin(), r.end(), 0.0f);
+        fx.process (l.data(), r.data(), 256);
+    }
+    CHECK (! fx.isActive());
+
+    float residual = 0.0f;
+    for (int i = 0; i < 256; ++i)
+        residual = std::max (residual, std::abs (l[static_cast<std::size_t> (i)]));
+    CHECK (residual < 0.01f);
+}
+
+TEST (reverbBurstDecaysToSilence)
+{
+    opxy::ReverbBurstFx fx;
+    fx.prepare (kSampleRate, 256);
+
+    fx.setEngaged (true);
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    for (int i = 0; i < 40; ++i)
+    {
+        for (int s = 0; s < 256; ++s)
+        {
+            const float v = 0.4f * static_cast<float> (std::sin (2.0 * 3.14159265 * 330.0 * (i * 256 + s) / kSampleRate));
+            l[static_cast<std::size_t> (s)] = v;
+            r[static_cast<std::size_t> (s)] = v;
+        }
+        fx.process (l.data(), r.data(), 256);
+    }
+    fx.setEngaged (false);
+
+    bool finite = true;
+    for (int i = 0; i < 1200; ++i) // 6.4 s
+    {
+        std::fill (l.begin(), l.end(), 0.0f);
+        std::fill (r.begin(), r.end(), 0.0f);
+        fx.process (l.data(), r.data(), 256);
+        for (int s = 0; s < 256; ++s)
+            if (! std::isfinite (l[static_cast<std::size_t> (s)]))
+                finite = false;
+    }
+
+    CHECK (finite);
+    CHECK (! fx.isActive());
+
+    float residual = 0.0f;
+    for (int i = 0; i < 256; ++i)
+        residual = std::max (residual, std::abs (l[static_cast<std::size_t> (i)]));
+    CHECK (residual < 0.01f);
+}
+
+TEST (bitcrushQuantisesAndRecovers)
+{
+    opxy::BitcrushFx fx;
+    fx.prepare (kSampleRate, 256);
+    fx.setPunchParam (0, 1.0f);  // max bit reduction
+    fx.setPunchParam (1, 0.0f);  // no decimation
+
+    fx.setEngaged (true);
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    for (int s = 0; s < 256; ++s)
+    {
+        const float v = 0.5f * static_cast<float> (std::sin (2.0 * 3.14159265 * 100.0 * s / kSampleRate));
+        l[static_cast<std::size_t> (s)] = v;
+        r[static_cast<std::size_t> (s)] = v;
+    }
+    for (int i = 0; i < 20; ++i)
+        fx.process (l.data(), r.data(), 256);
+
+    // Coarse quantisation should produce far fewer distinct values than a sine.
+    int distinct = 0;
+    float last = 999.0f;
+    std::vector<float> sorted (l.begin(), l.end());
+    std::sort (sorted.begin(), sorted.end());
+    for (float v : sorted)
+    {
+        if (std::abs (v - last) > 1.0e-6f)
+        {
+            ++distinct;
+            last = v;
+        }
+    }
+    CHECK (distinct <= 24);
+
+    // Releasing returns the effect to bypassed within a ramp.
+    fx.setEngaged (false);
+    for (int i = 0; i < 40; ++i)
+    {
+        std::fill (l.begin(), l.end(), 0.25f);
+        std::fill (r.begin(), r.end(), 0.25f);
+        fx.process (l.data(), r.data(), 256);
+    }
+    CHECK (! fx.isActive());
+    CHECK_NEAR (l[255], 0.25f, 0.01f);
+}
+
+TEST (filterSweepAttenuatesWhenEngaged)
+{
+    opxy::FilterSweepFx fx;
+    fx.prepare (kSampleRate, 256);
+    fx.setPunchParam (0, 1.0f);
+    fx.setPunchParam (1, 0.5f);
+
+    // A bright 4 kHz tone should lose energy once the sweep is engaged.
+    const auto measure = [&fx] (bool engaged)
+    {
+        fx.setEngaged (engaged);
+        std::vector<float> l (256, 0.0f), r (256, 0.0f);
+        double sumSquares = 0.0;
+        for (int i = 0; i < 60; ++i)
+        {
+            for (int s = 0; s < 256; ++s)
+            {
+                const float v = 0.4f * static_cast<float> (std::sin (2.0 * 3.14159265 * 4000.0 * (i * 256 + s) / kSampleRate));
+                l[static_cast<std::size_t> (s)] = v;
+                r[static_cast<std::size_t> (s)] = v;
+            }
+            fx.process (l.data(), r.data(), 256);
+            if (i > 30)
+                for (int s = 0; s < 256; ++s)
+                    sumSquares += static_cast<double> (l[static_cast<std::size_t> (s)]) * l[static_cast<std::size_t> (s)];
+        }
+        return std::sqrt (sumSquares / (30.0 * 256.0));
+    };
+
+    const double open = measure (false);
+    const double swept = measure (true);
+
+    CHECK (open > 0.1);
+    CHECK (swept < open * 0.5);
+}
+
+TEST (stutterRepeatsTheSliceAndStops)
+{
+    opxy::StutterFx fx;
+    fx.prepare (kSampleRate, 256);
+    fx.setPunchParam (0, 0.05f);   // short slice
+    fx.setPunchParam (1, 0.0f);    // half speed
+
+    fx.setEngaged (true);
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    bool finite = true;
+    for (int i = 0; i < 200; ++i)
+    {
+        // Feed a ramp so a naive pass-through would be obvious.
+        for (int s = 0; s < 256; ++s)
+        {
+            const float v = 0.3f * static_cast<float> (std::sin (2.0 * 3.14159265 * 440.0 * (i * 256 + s) / kSampleRate));
+            l[static_cast<std::size_t> (s)] = v;
+            r[static_cast<std::size_t> (s)] = v;
+        }
+        fx.process (l.data(), r.data(), 256);
+        for (int s = 0; s < 256; ++s)
+            if (! std::isfinite (l[static_cast<std::size_t> (s)]))
+                finite = false;
+    }
+    CHECK (finite);
+
+    fx.setEngaged (false);
+    for (int i = 0; i < 20; ++i)
+    {
+        std::fill (l.begin(), l.end(), 0.2f);
+        std::fill (r.begin(), r.end(), 0.2f);
+        fx.process (l.data(), r.data(), 256);
+    }
+    CHECK (! fx.isActive());
+    CHECK_NEAR (l[255], 0.2f, 0.02f);
+}
+
+TEST (enginePunchFxClearsWhenReleased)
+{
+    opxy::Engine engine;
+    engine.prepare (kSampleRate, 256);
+
+    for (auto& s : engine.getPattern().tracks[0].steps)
+        s.active.store (true);
+    for (int t = 1; t < opxy::kMaxTracks; ++t)
+        engine.getPattern().tracks[t].length.store (1);
+
+    std::vector<float> l (256, 0.0f), r (256, 0.0f);
+    float* channels[2] = { l.data(), r.data() };
+
+    opxy::TransportInfo transport;
+    transport.playing = true;
+    transport.bpm = 120.0;
+
+    // Punch the tape stop on the master bus.
+    auto& tape = engine.getFxSettings (static_cast<int> (opxy::FxType::TapeStop));
+    tape.engaged.store (true);
+
+    for (int i = 0; i < 60; ++i)
+    {
+        std::fill (l.begin(), l.end(), 0.0f);
+        std::fill (r.begin(), r.end(), 0.0f);
+        engine.process (channels, 2, 256, transport);
+    }
+
+    tape.engaged.store (false);
+
+    bool finite = true;
+    for (int i = 0; i < 300; ++i)
+    {
+        std::fill (l.begin(), l.end(), 0.0f);
+        std::fill (r.begin(), r.end(), 0.0f);
+        engine.process (channels, 2, 256, transport);
+        for (int s = 0; s < 256; ++s)
+            if (! std::isfinite (l[static_cast<std::size_t> (s)]))
+                finite = false;
+    }
+
+    CHECK (finite);
+
+    // Audio should still be flowing normally afterwards.
+    double peak = 0.0;
+    for (int i = 0; i < 40; ++i)
+    {
+        std::fill (l.begin(), l.end(), 0.0f);
+        std::fill (r.begin(), r.end(), 0.0f);
+        engine.process (channels, 2, 256, transport);
+        for (int s = 0; s < 256; ++s)
+            peak = std::max (peak, static_cast<double> (std::abs (l[static_cast<std::size_t> (s)])));
+    }
+    CHECK (peak > 0.001);
+}
+
+TEST (rampReachesTargetInAboutTheRequestedTime)
+{
+    opxy::Ramp ramp;
+    ramp.prepare (1000.0);
+    ramp.setTimeSeconds (0.1f);   // 100 samples to go 0 -> 1
+    ramp.setTarget (1.0f);
+
+    for (int i = 0; i < 100; ++i)
+        ramp.next();
+
+    CHECK_NEAR (ramp.getCurrent(), 1.0f, 0.001f);
+    CHECK (! ramp.isSmoothing());
+}
+
+// ------------------------------- FX bus (Seq Queen FX) ------------------------
+
+TEST (fxBusPassesAudioUntouchedUntilPunched)
+{
+    opxy::FxBus bus;
+    bus.prepare (kSampleRate, 512);
+
+    std::vector<float> l (512), r (512);
+    double maxError = 0.0;
+    for (int block = 0; block < 20; ++block)
+    {
+        for (int i = 0; i < 512; ++i)
+            l[static_cast<std::size_t> (i)] = r[static_cast<std::size_t> (i)]
+                = static_cast<float> (0.5 * std::sin (0.05 * (block * 512 + i)));
+        const std::vector<float> dry = l;
+        bus.process (l.data(), r.data(), 512);
+        for (int i = 0; i < 512; ++i)
+            maxError = std::max (maxError, static_cast<double> (std::abs (l[static_cast<std::size_t> (i)] - dry[static_cast<std::size_t> (i)])));
+    }
+    CHECK (maxError < 1.0e-6);
+    CHECK (! bus.isEngaged (0));
+}
+
+TEST (fxBusPunchChangesTheSoundAndVelocityScalesIt)
+{
+    const auto deviation = [] (float velocity)
+    {
+        opxy::FxBus bus;
+        bus.prepare (kSampleRate, 256);
+        const int bitcrush = static_cast<int> (opxy::FxType::Bitcrush);
+        bus.getSettings (bitcrush).amount.store (1.0f);
+        bus.getSettings (bitcrush).paramA.store (1.0f);
+        bus.getSettings (bitcrush).velocitySensitivity.store (1.0f);
+        bus.setPunchVelocity (bitcrush, velocity);
+        bus.getSettings (bitcrush).engaged.store (true);
+
+        std::vector<float> l (256), r (256);
+        double sum = 0.0;
+        for (int block = 0; block < 40; ++block)
+        {
+            for (int i = 0; i < 256; ++i)
+                l[static_cast<std::size_t> (i)] = r[static_cast<std::size_t> (i)]
+                    = static_cast<float> (0.5 * std::sin (0.03 * (block * 256 + i)));
+            const std::vector<float> dry = l;
+            bus.process (l.data(), r.data(), 256);
+            if (block >= 10)
+                for (int i = 0; i < 256; ++i)
+                    sum += std::abs (l[static_cast<std::size_t> (i)] - dry[static_cast<std::size_t> (i)]);
+        }
+        CHECK (bus.isEngaged (bitcrush));
+        return sum;
+    };
+
+    const double hard = deviation (1.0f);
+    const double soft = deviation (0.3f);
+    CHECK (hard > 1.0);
+    CHECK (soft < hard * 0.6);
+}
+
+// ------------------------------- note FX (Seq Queen Notes) --------------------
+
+namespace
+{
+struct TimedNote
+{
+    long long time;   // absolute sample
+    int note;
+    float velocity;
+    bool on;
+};
+
+struct NoteRun
+{
+    std::vector<opxy::NoteEvent> events;   // sampleOffset rewritten to absolute time
+};
+
+// Plays `input` through a NoteFx at 120 bpm / 48 kHz (one 16th = 6000 samples)
+// in blocks of `block`, with the transport running from ppq 0.
+NoteRun runNoteFx (opxy::NoteFx& fx, std::vector<TimedNote> input, long long totalSamples,
+                   int block = 512, bool playing = true)
+{
+    std::sort (input.begin(), input.end(), [] (const TimedNote& a, const TimedNote& b) { return a.time < b.time; });
+
+    NoteRun run;
+    std::size_t next = 0;
+    std::vector<opxy::NoteEvent> in, out (1024);
+    const double samplesPerBeat = kSampleRate * 0.5;
+
+    for (long long pos = 0; pos < totalSamples; pos += block)
+    {
+        const int n = static_cast<int> (std::min<long long> (block, totalSamples - pos));
+        in.clear();
+        while (next < input.size() && input[next].time < pos + n)
+        {
+            opxy::NoteEvent e;
+            e.sampleOffset = static_cast<int> (input[next].time - pos);
+            e.note = input[next].note;
+            e.velocity = input[next].velocity;
+            e.on = input[next].on;
+            in.push_back (e);
+            ++next;
+        }
+
+        opxy::TransportInfo transport;
+        transport.playing = playing;
+        transport.hasPpq = playing;
+        transport.bpm = 120.0;
+        transport.ppqAtBlockStart = static_cast<double> (pos) / samplesPerBeat;
+
+        const int count = fx.process (in.data(), static_cast<int> (in.size()), n, transport,
+                                      out.data(), static_cast<int> (out.size()));
+        for (int k = 0; k < count; ++k)
+        {
+            opxy::NoteEvent e = out[static_cast<std::size_t> (k)];
+            e.sampleOffset += static_cast<int> (pos);
+            run.events.push_back (e);
+        }
+    }
+    return run;
+}
+
+int countOns (const NoteRun& run, int note)
+{
+    int count = 0;
+    for (const auto& e : run.events)
+        count += (e.on && e.note == note) ? 1 : 0;
+    return count;
+}
+
+bool everyOnHasAnOff (const NoteRun& run)
+{
+    std::map<int, int> sounding;
+    for (const auto& e : run.events)
+        sounding[e.note] += e.on ? 1 : -1;
+    for (const auto& [note, count] : sounding)
+        if (count != 0)
+            return false;
+    return true;
+}
+
+constexpr long long kSixteenth = 6000;
+constexpr int kTrigger = 0;   // default base note: C-2
+int trig (opxy::NoteFxType type) { return kTrigger + static_cast<int> (type); }
+} // namespace
+
+TEST (noteFxPassesNotesThroughUnchanged)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const auto run = runNoteFx (fx, { { 100, 60, 0.8f, true }, { 3000, 60, 0.0f, false },
+                                      { 7000, 64, 0.5f, true }, { 9000, 64, 0.0f, false } }, 12000);
+    CHECK (run.events.size() == 4);
+    CHECK (run.events[0].note == 60 && run.events[0].on && run.events[0].sampleOffset == 100);
+    CHECK (run.events[3].note == 64 && ! run.events[3].on && run.events[3].sampleOffset == 9000);
+    CHECK_NEAR (run.events[2].velocity, 0.5f, 1.0e-6f);
+}
+
+TEST (noteFxSwallowsTriggersAndMuteDropsNotesAndTheirOffs)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const int mute = trig (opxy::NoteFxType::Mute);
+    const auto run = runNoteFx (fx, { { 0, mute, 1.0f, true },
+                                      { 1000, 60, 0.8f, true }, { 2000, 60, 0.0f, false },
+                                      { 2500, mute, 0.0f, false },
+                                      { 3000, 62, 0.8f, true }, { 4000, 62, 0.0f, false } }, 6000);
+    CHECK (run.events.size() == 2);
+    CHECK (countOns (run, 60) == 0);
+    CHECK (countOns (run, 62) == 1);
+    CHECK (countOns (run, mute) == 0);
+    CHECK (everyOnHasAnOff (run));
+}
+
+TEST (noteFxOctaveUpKeepsNoteOffsMatchedWhenReleasedMidNote)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const int up = trig (opxy::NoteFxType::OctaveUp);
+    // Trigger released while the note is still held: the note-off must still
+    // close the transposed pitch, not the original one.
+    const auto run = runNoteFx (fx, { { 0, up, 1.0f, true }, { 500, 60, 0.8f, true },
+                                      { 1000, up, 0.0f, false }, { 4000, 60, 0.0f, false } }, 6000);
+    CHECK (run.events.size() == 2);
+    CHECK (run.events[0].note == 72 && run.events[0].on);
+    CHECK (run.events[1].note == 72 && ! run.events[1].on);
+}
+
+TEST (noteFxHatsAddSixteenthsOnlyWhileTheTransportRuns)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const int hats = trig (opxy::NoteFxType::Hats);
+    const std::vector<TimedNote> hold { { 0, hats, 1.0f, true } };
+
+    const auto running = runNoteFx (fx, hold, kSixteenth * 16);
+    CHECK (countOns (running, 42) == 16);
+    CHECK (everyOnHasAnOff (running));
+
+    // Offbeat 16ths are quieter than the 8ths.
+    std::vector<float> velocities;
+    for (const auto& e : running.events)
+        if (e.on)
+            velocities.push_back (e.velocity);
+    CHECK (velocities.size() == 16 && velocities[0] > velocities[1]);
+
+    opxy::NoteFx stopped;
+    stopped.prepare (kSampleRate);
+    CHECK (countOns (runNoteFx (stopped, hold, kSixteenth * 16, 512, false), 42) == 0);
+}
+
+TEST (noteFxKickSnareAddsABeat)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::KickSnare), 0.9f, true } }, kSixteenth * 16);
+    CHECK (countOns (run, 36) == 3);
+    CHECK (countOns (run, 38) == 2);
+    CHECK (everyOnHasAnOff (run));
+}
+
+TEST (noteFxFillPlaysTheLastHitOnEmptySixteenthsOnly)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const int fill = trig (opxy::NoteFxType::Fill);
+    // A hit on step 0 and step 8; fill held for the whole bar. Odd block size so
+    // grid points land at awkward offsets.
+    const auto run = runNoteFx (fx, { { 0, fill, 1.0f, true },
+                                      { 0, 40, 0.7f, true }, { 1000, 40, 0.0f, false },
+                                      { kSixteenth * 8, 40, 0.7f, true }, { kSixteenth * 8 + 1000, 40, 0.0f, false } },
+                                kSixteenth * 16, 333);
+    CHECK (countOns (run, 40) == 16);   // 2 real + 14 filled, none doubled
+    CHECK (everyOnHasAnOff (run));
+}
+
+TEST (noteFxHalfFillOnlyUsesEighths)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::HalfFill), 1.0f, true },
+                                      { 0, 40, 0.7f, true }, { 1000, 40, 0.0f, false } },
+                                kSixteenth * 16);
+    CHECK (countOns (run, 40) == 8);
+}
+
+TEST (noteFxRepeatRollsTheLastNoteAtTheChosenRate)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    fx.getSettings().repeatRate.store (2);   // 1/32
+    const auto run = runNoteFx (fx, { { 0, 50, 0.7f, true }, { 1000, 50, 0.0f, false },
+                                      { 1000, trig (opxy::NoteFxType::Repeat), 1.0f, true } },
+                                kSixteenth * 4);
+    CHECK (countOns (run, 50) == 1 + 7);   // the real hit, then every 32nd after it
+    CHECK (everyOnHasAnOff (run));
+}
+
+TEST (noteFxSkipShortenAndEcho)
+{
+    {
+        opxy::NoteFx fx;
+        fx.prepare (kSampleRate);
+        std::vector<TimedNote> input { { 0, trig (opxy::NoteFxType::Skip), 1.0f, true } };
+        for (int k = 0; k < 8; ++k)
+            input.push_back ({ 100 + k * 1000LL, 60 + k, 0.8f, true }),
+            input.push_back ({ 600 + k * 1000LL, 60 + k, 0.0f, false });
+        const auto run = runNoteFx (fx, input, 10000);
+        int ons = 0;
+        for (const auto& e : run.events)
+            ons += e.on ? 1 : 0;
+        CHECK (ons == 4);
+        CHECK (everyOnHasAnOff (run));
+    }
+    {
+        opxy::NoteFx fx;
+        fx.prepare (kSampleRate);
+        const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::Shorten), 1.0f, true },
+                                          { 100, 60, 0.8f, true }, { 20000, 60, 0.0f, false } }, 24000);
+        CHECK (run.events.size() == 2);
+        CHECK (! run.events[1].on && run.events[1].sampleOffset - 100 <= 3000);
+    }
+    {
+        opxy::NoteFx fx;
+        fx.prepare (kSampleRate);
+        const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::Echo), 1.0f, true },
+                                          { 100, 60, 0.8f, true }, { 2000, 60, 0.0f, false } }, 24000);
+        CHECK (countOns (run, 60) == 2);
+        CHECK (everyOnHasAnOff (run));
+        CHECK (run.events.size() == 4 && run.events[2].sampleOffset == 100 + 12000);
+    }
+}
+
+TEST (noteFxNeverLeavesANoteHangingUnderRandomAbuse)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    opxy::Prng prng (1234);
+
+    std::vector<TimedNote> input;
+    long long time = 0;
+    for (int k = 0; k < 400; ++k)
+    {
+        time += 200 + prng.nextInt (4000);
+        if (prng.nextInt (3) == 0)
+        {
+            const int fx12 = prng.nextInt (opxy::kNumNoteFx);
+            input.push_back ({ time, kTrigger + fx12, 1.0f, true });
+            input.push_back ({ time + 500 + prng.nextInt (20000), kTrigger + fx12, 0.0f, false });
+        }
+        else
+        {
+            // Distinct pitch per note so input on/off pairs never overlap.
+            const int note = 30 + (k % 60);
+            input.push_back ({ time, note, 0.8f, true });
+            input.push_back ({ time + 100 + prng.nextInt (8000), note, 0.0f, false });
+        }
+    }
+
+    const auto run = runNoteFx (fx, input, time + 60000, 256);
+    CHECK (run.events.size() > 400);
+    CHECK (everyOnHasAnOff (run));
+}
+
+// ------------------------------- new punch FX ---------------------------------
+
+namespace
+{
+// Feeds `signal(sampleIndex)` through an FxChain-style idle/active loop: the
+// effect listens while idle and processes once engaged at `engageAt`.
+std::vector<float> runIdleThenEngaged (opxy::PunchInFx& fx, const std::function<float (int)>& signal,
+                                       int engageAt, int total, int block = 256)
+{
+    fx.prepare (kSampleRate, block);
+    std::vector<float> out;
+    std::vector<float> l (static_cast<std::size_t> (block)), r (static_cast<std::size_t> (block));
+    for (int pos = 0; pos < total; pos += block)
+    {
+        for (int i = 0; i < block; ++i)
+            l[static_cast<std::size_t> (i)] = r[static_cast<std::size_t> (i)] = signal (pos + i);
+        fx.setEngaged (pos >= engageAt);
+        if (fx.isActive())
+            fx.process (l.data(), r.data(), block);
+        else
+            fx.listen (l.data(), r.data(), block);
+        out.insert (out.end(), l.begin(), l.end());
+    }
+    return out;
+}
+
+int zeroCrossings (const std::vector<float>& v, std::size_t from, std::size_t to)
+{
+    int count = 0;
+    for (std::size_t i = from + 1; i < to; ++i)
+        count += (v[i - 1] < 0.0f) != (v[i] < 0.0f) ? 1 : 0;
+    return count;
+}
+} // namespace
+
+TEST (stutterLoopsTheAudioThatJustPlayedNotStaleHistory)
+{
+    // Regression: idle effects weren't recording, so the first punch looped
+    // silence. A sine plays for half a second before the punch.
+    opxy::StutterFx fx;
+    fx.setPunchParam (0, 0.2f);
+    fx.setPunchParam (1, 1.0f / 3.0f);   // 1x
+    const int engageAt = static_cast<int> (kSampleRate * 0.5);
+    const auto out = runIdleThenEngaged (fx, [] (int i) { return 0.4f * static_cast<float> (std::sin (0.05 * i)); },
+                                         engageAt, engageAt + static_cast<int> (kSampleRate * 0.5));
+    double energy = 0.0;
+    for (std::size_t i = static_cast<std::size_t> (engageAt + 4800); i < out.size(); ++i)
+        energy += static_cast<double> (out[i]) * out[i];
+    CHECK (std::sqrt (energy / static_cast<double> (out.size() - static_cast<std::size_t> (engageAt + 4800))) > 0.15);
+}
+
+TEST (reversePlaysTheLastBeatBackwards)
+{
+    // A rising ramp, reversed, must fall.
+    opxy::ReverseFx fx;
+    fx.setPunchParam (0, 0.5f);           // one beat
+    fx.setPunchParam (1, 1.0f / 3.0f);    // 1x
+    opxy::TransportInfo transport;
+    transport.bpm = 120.0;
+    fx.setTransport (transport);
+
+    const int engageAt = static_cast<int> (kSampleRate);
+    const auto out = runIdleThenEngaged (fx, [] (int i) { return static_cast<float> (i % 48000) / 48000.0f; },
+                                         engageAt, engageAt + 12000);
+    // Inside the first reversed segment (past the fade-in), the output falls.
+    int falling = 0, rising = 0;
+    for (std::size_t i = static_cast<std::size_t> (engageAt + 2000); i < static_cast<std::size_t> (engageAt + 10000); ++i)
+        (out[i] < out[i - 1] ? falling : rising) += 1;
+    CHECK (falling > rising * 10);
+    CHECK (opxy::ReverseFx::lengthBeats (0.0f) == 0.25 && opxy::ReverseFx::lengthBeats (1.0f) == 4.0);
+}
+
+TEST (gateChopsInTimeWithTheHost)
+{
+    opxy::GateFx fx;
+    fx.prepare (kSampleRate, 256);
+    fx.setPunchParam (0, 2.0f / 3.0f);   // 1/16
+    fx.setPunchParam (1, 0.0f);          // hard gate
+    fx.setEngaged (true);
+
+    // 120 bpm: a 16th is 6000 samples; on for the first 3000, off for the rest.
+    std::vector<float> l (256), r (256), out;
+    for (int pos = 0; pos < 48000; pos += 256)
+    {
+        opxy::TransportInfo transport;
+        transport.playing = transport.hasPpq = true;
+        transport.bpm = 120.0;
+        transport.ppqAtBlockStart = pos / 24000.0;
+        fx.setTransport (transport);
+        std::fill (l.begin(), l.end(), 0.5f);
+        std::fill (r.begin(), r.end(), 0.5f);
+        fx.process (l.data(), r.data(), 256);
+        out.insert (out.end(), l.begin(), l.end());
+    }
+    // Well after the engage ramp: middle of an "on" half vs an "off" half.
+    CHECK (out[36000 + 1500] > 0.45f);
+    CHECK (out[36000 + 4500] < 0.05f);
+    CHECK (out[42000 + 1500] > 0.45f);
+    CHECK (opxy::GateFx::divisionBeats (0.0f) == 1.0 && opxy::GateFx::divisionBeats (1.0f) == 0.125);
+}
+
+TEST (highPassDrainsTheBassWhenEngaged)
+{
+    opxy::HighPassFx fx;
+    fx.prepare (kSampleRate, 256);
+    fx.setPunchParam (0, 0.75f);
+    const auto measure = [&fx] (bool engaged)
+    {
+        fx.setEngaged (engaged);
+        std::vector<float> l (256), r (256);
+        double sum = 0.0;
+        for (int i = 0; i < 120; ++i)
+        {
+            for (int s = 0; s < 256; ++s)
+                l[static_cast<std::size_t> (s)] = r[static_cast<std::size_t> (s)]
+                    = 0.4f * static_cast<float> (std::sin (2.0 * 3.14159265 * 60.0 * (i * 256 + s) / kSampleRate));
+            fx.process (l.data(), r.data(), 256);
+            if (i > 80)
+                for (float v : l)
+                    sum += static_cast<double> (v) * v;
+        }
+        return std::sqrt (sum / (39.0 * 256.0));
+    };
+    const double open = measure (false);
+    const double swept = measure (true);
+    CHECK (open > 0.2);
+    CHECK (swept < open * 0.2);
+}
+
+TEST (pitchShiftMovesTheToneByTheInterval)
+{
+    for (const float interval : { 1.0f, 0.0f })   // +12, then -12
+    {
+        opxy::PitchShiftFx fx;
+        fx.setPunchParam (0, interval);
+        fx.setPunchParam (1, 0.4f);
+        const auto out = runIdleThenEngaged (fx,
+            [] (int i) { return 0.4f * static_cast<float> (std::sin (2.0 * 3.14159265 * 440.0 * i / kSampleRate)); },
+            0, static_cast<int> (kSampleRate * 1.5));
+        // Count over the last second (well past the engage ramp).
+        const double hz = zeroCrossings (out, static_cast<std::size_t> (kSampleRate * 0.5), out.size()) / 2.0;
+        const double expected = interval > 0.5f ? 880.0 : 220.0;
+        CHECK (std::abs (hz - expected) < expected * 0.08);
+    }
+    CHECK (opxy::PitchShiftFx::semitones (0.0f) == -12 && opxy::PitchShiftFx::semitones (1.0f) == 12);
+}
+
+TEST (fxBusFollowsTheHostTempoForTheGate)
+{
+    opxy::FxBus bus;
+    bus.prepare (kSampleRate, 4096);
+    const int gate = static_cast<int> (opxy::FxType::Gate);
+    bus.getSettings (gate).amount.store (1.0f);
+    bus.getSettings (gate).paramA.store (0.0f);   // 1/4
+    bus.getSettings (gate).paramB.store (0.0f);
+    bus.getSettings (gate).engaged.store (true);
+
+    // One big block of 2 beats at 120 bpm; ppq comes from the host only once.
+    opxy::TransportInfo transport;
+    transport.playing = transport.hasPpq = true;
+    transport.bpm = 120.0;
+    std::vector<float> l (48000, 0.5f), r (48000, 0.5f);
+    bus.setTransport (transport);
+    bus.process (l.data(), r.data(), 48000);
+    CHECK (l[24000 + 6000] > 0.45f);    // first half of beat 2: open
+    CHECK (l[24000 + 18000] < 0.05f);   // second half: closed
+}
+
+TEST (noteFxArpPlaysHeldNotesUpOnTheGrid)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    // Chord C-E-G held for a bar with the arp on at 1/16.
+    const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::Arp), 1.0f, true },
+                                      { 0, 67, 0.8f, true }, { 0, 60, 0.8f, true }, { 0, 64, 0.8f, true },
+                                      { kSixteenth * 16 - 10, 60, 0.0f, false }, { kSixteenth * 16 - 10, 64, 0.0f, false },
+                                      { kSixteenth * 16 - 10, 67, 0.0f, false } },
+                                kSixteenth * 16);
+    std::vector<int> ons;
+    for (const auto& e : run.events)
+        if (e.on)
+            ons.push_back (e.note);
+    CHECK (ons.size() == 16);
+    CHECK (ons.size() >= 4 && ons[0] == 60 && ons[1] == 64 && ons[2] == 67 && ons[3] == 60);
+    CHECK (everyOnHasAnOff (run));
+}
+
+TEST (noteFxChordAddsFifthAndOctaveAndClosesThemAll)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    const int chord = trig (opxy::NoteFxType::Chord);
+    // Chord released before the note: all three must still be closed.
+    const auto run = runNoteFx (fx, { { 0, chord, 1.0f, true }, { 100, 48, 0.8f, true },
+                                      { 500, chord, 0.0f, false }, { 3000, 48, 0.0f, false } }, 6000);
+    CHECK (countOns (run, 48) == 1 && countOns (run, 55) == 1 && countOns (run, 60) == 1);
+    CHECK (everyOnHasAnOff (run));
+}
+
+TEST (noteFxStrumSpreadsChordsAndFlamsSingleHits)
+{
+    {
+        opxy::NoteFx fx;
+        fx.prepare (kSampleRate);
+        const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::Strum), 1.0f, true },
+                                          { 1000, 60, 0.8f, true }, { 1000, 64, 0.8f, true }, { 1000, 67, 0.8f, true },
+                                          { 20000, 60, 0.0f, false }, { 20000, 64, 0.0f, false }, { 20000, 67, 0.0f, false } },
+                                    24000);
+        std::map<int, int> firstOn;
+        for (const auto& e : run.events)
+            if (e.on && firstOn.count (e.note) == 0)
+                firstOn[e.note] = e.sampleOffset;
+        // Grace hit on the first note now; the chord notes then arrive 30 ms apart.
+        CHECK (firstOn[64] - firstOn[60] == 0 || firstOn[64] > firstOn[60]);
+        CHECK (firstOn[67] - firstOn[64] > 1200);
+        CHECK (countOns (run, 60) == 2);   // grace + real
+        CHECK (everyOnHasAnOff (run));
+    }
+    {
+        // A note shorter than the strum delay: its off must not overtake its on.
+        opxy::NoteFx fx;
+        fx.prepare (kSampleRate);
+        const auto run = runNoteFx (fx, { { 0, trig (opxy::NoteFxType::Strum), 1.0f, true },
+                                          { 100, 36, 0.9f, true }, { 150, 36, 0.0f, false } }, 6000);
+        int lastOn = -1, lastOff = -1;
+        for (const auto& e : run.events)
+            if (e.note == 36)
+                (e.on ? lastOn : lastOff) = e.sampleOffset;
+        CHECK (lastOff > lastOn);
+        CHECK (everyOnHasAnOff (run));
+    }
+}
+
+TEST (noteFxGrooveSwingsOffBeatsAndAccentsTheBeat)
+{
+    opxy::NoteFx fx;
+    fx.prepare (kSampleRate);
+    fx.getSettings().swing.store (0.5f);   // half a 16th = 3000 samples
+    std::vector<TimedNote> input { { 0, trig (opxy::NoteFxType::Groove), 1.0f, true } };
+    for (int step = 0; step < 4; ++step)
+    {
+        input.push_back ({ step * kSixteenth, 40 + step, 0.7f, true });
+        input.push_back ({ step * kSixteenth + 1000, 40 + step, 0.0f, false });
+    }
+    const auto run = runNoteFx (fx, input, kSixteenth * 5);
+    std::map<int, opxy::NoteEvent> on;
+    for (const auto& e : run.events)
+        if (e.on)
+            on[e.note] = e;
+    const auto drift = [] (int offset, long long step) { return offset - step * kSixteenth; };
+    CHECK (drift (on[40].sampleOffset, 0) < 400);                                       // on the beat: a little drift only
+    CHECK (drift (on[41].sampleOffset, 1) >= 3000 && drift (on[41].sampleOffset, 1) < 3400);   // off-beat: swung
+    CHECK (drift (on[42].sampleOffset, 2) < 400);
+    CHECK (on[40].velocity > on[41].velocity);                                          // beat accented
+    CHECK (everyOnHasAnOff (run));
+}
+
+// ------------------------------------ main ----------------------------------
+
+int main()
+{
+    std::printf ("opxy core tests (%zu)\n", tests().size());
+
+    for (auto& t : tests())
+    {
+        gCurrentTest = t.name;
+        const int before = gFailures;
+        t.fn();
+        const bool passed = gFailures == before;
+        std::printf ("%s %s\n", passed ? "  ok  " : "  FAIL", t.name);
+    }
+
+    std::printf ("\n%d checks, %d failures\n", gChecks, gFailures);
+    return gFailures == 0 ? 0 : 1;
+}
