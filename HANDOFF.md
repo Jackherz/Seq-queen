@@ -155,7 +155,7 @@ Source/Devices/
   Shared/SeqQueenLookAndFeel.*   knob/combo/button drawing
 
 Source/Max/
-  seqqueen_notes.cpp             the Max external: MIDI bytes in/out, ITM transport,
+  seqqueen_notes.cpp             the Max external: MIDI bytes in/out, plugsync~ transport,
                                  1 ms clock, FX trigger notes -> punch messages
   seqqueen-link.js               finds Seq Queen FX on the track, feeds live.remote~ ids
 tools/m4l/build_device.py        writes the .amxd (patch as code)
@@ -207,16 +207,21 @@ docs/ADDING_AN_FX.md             recipe for adding a seventh punch-in effect
    low-priority thread, which would make drums sloppy. `seqqueen.notes` runs the
    tested `NoteFx` on the scheduler; JS (`seqqueen-link.js`) only finds the FX
    device when the track's devices change.
-12. **The external times itself with `systimer_gettime()`, never the ITM's clock.**
-   The ITM clock stops with Live's transport; timing off it stalled every scheduled
-   note-off while stopped (the user's stuck notes). ITM is only for ticks, tempo
-   and play state. `seqqueen_max_smoke` freezes its fake ITM clock when stopped to
-   guard this.
-13. **Pads are textbuttons + `[mousestate]`**, sending press/release to the
-   external, which owns momentary vs latched (`latch` message, "Pads" switch). The
-   engine's `active` messages recolour them. Colours are marked as fixed
-   (`saved_attribute_attributes` with an empty expression) so Live's theme doesn't
-   override them.
+12. **The external's transport comes from `[plugsync~]`, its clock from
+   `systimer_gettime()`.** Every tick it sends `sync`; the patch polls
+   `plugsync~` and play state / tempo / beats come straight back in. Between
+   Live's per-buffer updates the position is extrapolated, never backwards. Max's
+   global ITM did not follow Live's playhead inside the device (fill, hats,
+   kick+snare, groove never fired), and its clock stops with the transport (stuck
+   note-offs). `seqqueen_max_smoke` fakes plugsync's per-buffer reports.
+13. **Pads are textbuttons in button mode.** Middle outlet (text, press only) →
+   `padpress i`; left outlet (bang on press and release) → `padbang i`. The
+   external treats a bang within 5 ms of a press as that press's own and any
+   other bang as the release, so it doesn't matter which outlet fires first.
+   (`[mousestate]` was tried first and could read the button as still down at the
+   release, so pads stuck on.) The external owns momentary vs latched (`latch`
+   message, "Pads" switch); its `active` messages recolour the pads, whose
+   colours are marked fixed so Live's theme doesn't override them.
 14. **Seq Queen FX is built with `JUCE_VST3_EMULATE_MIDI_CC_WITH_PARAMETERS=0`.**
    Otherwise JUCE adds 2048 hidden MIDI-CC parameters and Live stops listing the
    real ones, which the Max device needs to reach the Punch controls.
@@ -271,6 +276,11 @@ slowly, pitch shift by the interval.
   Fine on this machine; freeze it before giving it to anyone else.
 * **Timing in the Max device** is scheduler-driven: within about one audio vector
   (~1–3 ms) rather than sample-accurate. Pass-through notes aren't delayed.
+* **`plugsync~` has only been exercised inside Live by the user**, not here:
+  standalone Max has no host playhead. If the grid punches misbehave, check its
+  outlets (0 state, 5 tempo, 6 position in beats) first.
+* **Shorten only sends an early note-off.** One-shot drum samples ignore
+  note-offs, so it's inaudible on most Drum Rack kits; it's obvious on synths.
 * **Notes' generators need a running transport** (they follow the host's ppq).
   Mute, octave, shorten, random, skip and echo work while stopped.
 * **Random draws from the last 8 distinct pitches played**, so it does nothing

@@ -40,7 +40,10 @@ std::map<t_symbol*, std::string> gSymbols;
 void* gClockOwner = nullptr;
 method gClockFn = nullptr;
 
-double gTimeMs = 0.0, gTicks = 0.0, gTempo = 120.0;
+// The fake Live transport, as [plugsync~] would report it: the position only
+// updates once per 128-sample audio buffer, like Live's.
+double gTempo = 120.0, gBeats = 0.0, gReportedBeats = 0.0, gSinceReportMs = 0.0;
+void* gObject = nullptr;
 double gSystemMs = 1000.0;   // the CPU clock: always moves
 long gRunning = 0;
 
@@ -85,6 +88,13 @@ void* outlet_int (void*, t_atom_long n)
 }
 void* outlet_anything (void*, t_symbol* s, short ac, t_atom* av)
 {
+    if (gSymbols[s] == "sync")   // the patch polls [plugsync~]; answers come straight back
+    {
+        reinterpret_cast<void (*) (void*, double)> (gClass.methods["beats"]) (gObject, gReportedBeats);
+        reinterpret_cast<void (*) (void*, double)> (gClass.methods["tempo"]) (gObject, gTempo);
+        reinterpret_cast<void (*) (void*, long)> (gClass.methods["playing"]) (gObject, gRunning);
+        return nullptr;
+    }
     std::vector<double> values;
     for (int i = 0; i < ac; ++i)
         values.push_back (av[i].a_type == A_FLOAT ? av[i].a_w.w_float : static_cast<double> (av[i].a_w.w_long));
@@ -104,18 +114,11 @@ int snprintf_zero (char* buffer, size_t count, const char* format, ...)
 t_clock* clock_new (void* obj, method fn) { gClockOwner = obj; gClockFn = fn; return reinterpret_cast<t_clock*> (&gClockFn); }
 void clock_fdelay (void*, double) {}
 void clock_unset (void*) {}
-void* itm_getglobal() { static int itm; return &itm; }
-double itm_gettime (t_itm*) { return gTimeMs; }
 double systimer_gettime() { return gSystemMs; }
-double itm_getticks (t_itm*) { return gTicks; }
-double itm_gettempo (t_itm*) { return gTempo; }
-long itm_getstate (t_itm*) { return gRunning; }
 }
 
 namespace
 {
-void* gObject = nullptr;
-
 void sendBytes (std::initializer_list<int> bytes)
 {
     auto fn = reinterpret_cast<void (*) (void*, long)> (gClass.methods["int"]);
@@ -129,10 +132,15 @@ void advanceMs (double ms)
     for (double t = 0.0; t < ms; t += 1.0)
     {
         gSystemMs += 1.0;
-        if (gRunning)   // like Live: the transport's own clock stops with it
+        if (gRunning)
         {
-            gTimeMs += 1.0;
-            gTicks += 480.0 * gTempo / 60000.0;
+            gBeats += gTempo / 60000.0;
+            gSinceReportMs += 1.0;
+            if (gSinceReportMs >= 128.0 / 48.0)
+            {
+                gSinceReportMs = 0.0;
+                gReportedBeats = gBeats;
+            }
         }
         reinterpret_cast<void (*) (void*)> (gClockFn) (gClockOwner);
     }
@@ -219,6 +227,28 @@ int main (int argc, char* argv[])
     expect (ons == offs, "every generated hat got its note-off");
     expect (gMessages["active"].back()[1] == 0, "pad light turns off");
 
+    // Sequenced, like a clip: trigger notes with Live playing. These are the grid
+    // punches that never fired when the transport came from Max's own ITM.
+    gRunning = 1;
+    gMidi.clear();
+    sendBytes ({ 0x90, 4, 100 });              // E-2: Kick+Snare
+    advanceMs (2000.0);                        // one bar at 120 bpm
+    sendBytes ({ 0x80, 4, 0 });
+    expect (countNoteOns (36) == 3 && countNoteOns (38) == 2, "kick+snare from a trigger note adds a bar's beat");
+
+    gMidi.clear();
+    sendBytes ({ 0x90, 40, 100, 0x80, 40, 0 });   // a hit to fill with
+    sendBytes ({ 0x90, 2, 100 });                 // D-2: Fill
+    advanceMs (1000.0);                           // eight 16ths
+    sendBytes ({ 0x80, 2, 0 });
+    advanceMs (100.0);
+    expect (countNoteOns (40) >= 8 && countNoteOns (40) <= 9, "fill from a trigger note fills the 16ths");
+    int fillOns = 0, fillOffs = 0;
+    for (std::size_t i = 0; i + 2 < gMidi.size(); i += 3)
+        if (gMidi[i + 1] == 40)
+            ((gMidi[i] & 0xF0) == 0x90 && gMidi[i + 2] > 0 ? fillOns : fillOffs) += 1;
+    expect (fillOns == fillOffs, "every fill note got its note-off");
+
     // Regression: with the transport stopped, a shortened note must still end on
     // time. Timing off the transport clock (which stops) left it hanging.
     gRunning = 0;
@@ -237,6 +267,41 @@ int main (int argc, char* argv[])
     {
         std::printf ("  FAIL no latch method\n\n%d failures\n", ++gFailures);
         return 1;
+    }
+
+    // Real pads: textbutton sends "padpress" (middle outlet, press only) and
+    // "padbang" (left outlet, press and release). Either may fire first on press.
+    {
+        const auto press = reinterpret_cast<void (*) (void*, long)> (gClass.methods["padpress"]);
+        const auto bang = reinterpret_cast<void (*) (void*, long)> (gClass.methods["padbang"]);
+        bool ok = press != nullptr && bang != nullptr;
+        for (int order = 0; order < 2 && ok; ++order)
+        {
+            if (order == 0) { press (gObject, 0); bang (gObject, 0); }
+            else            { bang (gObject, 0); press (gObject, 0); }
+            advanceMs (50.0);
+            gMidi.clear();
+            sendBytes ({ 0x90, 60, 100, 0x80, 60, 0 });
+            const bool mutedWhileHeld = gMidi.empty();
+            bang (gObject, 0);                 // release
+            advanceMs (5.0);
+            sendBytes ({ 0x90, 61, 100, 0x80, 61, 0 });
+            ok = mutedWhileHeld && gMidi.size() == 6 && gMidi[1] == 61;
+        }
+        expect (ok, "pad press/release works whichever textbutton outlet fires first");
+
+        // Pressing one pad after another must not keep the first one held.
+        press (gObject, 6); bang (gObject, 6);       // Octave Up, held
+        advanceMs (50.0);
+        bang (gObject, 6);                           // let go
+        advanceMs (5.0);
+        press (gObject, 7); bang (gObject, 7);       // Octave Down, held
+        advanceMs (50.0);
+        gMidi.clear();
+        sendBytes ({ 0x90, 60, 100, 0x80, 60, 0 });
+        expect (gMidi.size() == 6 && gMidi[1] == 48, "pressing a new pad doesn't keep the previous one held");
+        bang (gObject, 7);
+        advanceMs (5.0);
     }
 
     // Momentary pads: Mute only while pressed.

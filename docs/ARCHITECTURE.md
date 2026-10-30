@@ -30,8 +30,9 @@ MIDI clip → [Seq Queen Notes .amxd] → [Drum Rack / synth] → [Seq Queen FX 
   they become `punch <fx> <strength>` messages, which `live.remote~` writes into
   that effect's *Punch* parameter (0 = release).
 * Timing: a 1 ms Max clock advances a virtual 48 kHz sample clock by the real time
-  elapsed and reads Live's transport through Max's global ITM. Incoming notes are
-  processed on arrival, so pass-through adds no delay.
+  elapsed (CPU clock). Each tick polls `[plugsync~]` for Live's play state, tempo
+  and position, extrapolating between Live's per-buffer updates. Incoming notes
+  are processed on arrival, so pass-through adds no delay.
 * The link script runs only when the track's devices change, never per note.
 
 ## Seq Queen FX, per block

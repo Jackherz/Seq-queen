@@ -5,8 +5,11 @@
 //  Same engine as the VST3 (opxy::NoteFx); this file only adapts Max to it:
 //
 //    inlet      raw MIDI bytes from [midiin]
-//               pad <i> <0|1>     on-screen pad pressed / released
+//               padpress <i>, padbang <i>   from the pad textbuttons (see below)
+//               pad <i> <0|1>     pad pressed / released (direct form, for tests)
 //               latch <0|1>       pads latch (press on, press off) or are momentary
+//               playing <0|1>, tempo <bpm>, beats <position>
+//                                 Live's transport, from [plugsync~]
 //               kick|snare|hat <note>, rate <0-2>, swing <0-0.6>
 //    outlet     one outlet, so the patch never depends on outlet order:
 //               <int>                 raw MIDI bytes for [midiout]
@@ -14,20 +17,24 @@
 //                                     C0..A0 (24-33) are Seq Queen FX's triggers
 //               active <i> <0|1>      a note punch became active / inactive,
 //                                     for lighting the pads
-//               The patch splits them with [route punch active].
+//               sync                  "poll [plugsync~] now": sent every tick, the
+//                                     answers come straight back in (above)
+//               The patch splits them with [route punch active sync].
 //
 //  Timing: NoteFx counts in samples, Max in milliseconds. A 1 ms clock (one
 //  audio vector when Live runs the scheduler in audio interrupt) advances a
 //  virtual 48 kHz sample clock by the real time elapsed (systimer, the CPU
-//  clock). The host grid, tempo and play state come from Max's global transport
-//  (ITM), which follows Live. Don't time anything off the ITM's own clock: it
-//  stops with Live's transport, and scheduled note-offs then stall (stuck
-//  notes). Incoming notes are processed on arrival, so pass-through adds no delay.
+//  clock). The host grid, tempo and play state come from [plugsync~], polled
+//  every tick; between Live's updates (one per audio buffer) the position is
+//  extrapolated from the tempo and never runs backwards. (Max's global ITM
+//  transport turned out not to follow Live's playhead inside a device: the grid
+//  punches never fired. Its clock also stops with the transport, which stalled
+//  note-offs.) Incoming notes are processed on arrival, so pass-through adds no
+//  delay.
 // -----------------------------------------------------------------------------
 
 #include "ext.h"
 #include "ext_obex.h"
-#include "ext_itm.h"
 
 #include "NoteFx.h"
 
@@ -42,7 +49,8 @@ constexpr int kFxFirstNote = 24;      // C0 in Live's numbering
 constexpr int kNumFxTriggers = 10;    // Seq Queen FX has ten effects
 constexpr int kMaxIn = 256;
 constexpr int kMaxOut = 1024;
-constexpr double kTicksPerQuarter = 480.0;   // ITM ticks
+constexpr double kPressBangWindowMs = 5.0;   // a press's own bang arrives with it
+constexpr double kMaxExtrapolationMs = 100.0;
 } // namespace
 
 struct t_sqnotes
@@ -67,13 +75,25 @@ struct t_sqnotes
     // Pads: momentary (held while pressed) or latched (press on, press off).
     bool latchMode;
     bool latched[opxy::kNumNoteFx];
+    double lastPressMs[opxy::kNumNoteFx];
+
+    // Live's transport, as last reported by [plugsync~].
+    bool hostPlaying;
+    double hostTempo;
+    double hostBeats;          // last reported position, in quarter notes
+    double hostBeatsMs;        // when that position changed
+    bool wasPlaying;
+    double lastPpq;            // where the previous step ended
 };
 
 static t_class* sqnotes_class = nullptr;
 
 static void sqnotes_step (t_sqnotes* x)
 {
-    t_itm* itm = static_cast<t_itm*> (itm_getglobal());
+    // Ask [plugsync~] for Live's transport; its answers arrive (re-entrantly)
+    // as playing/tempo/beats before outlet_anything returns.
+    outlet_anything (x->outlet, gensym ("sync"), 0, nullptr);
+
     const double now = systimer_gettime();
     const double elapsedMs = std::max (0.0, now - x->lastMs);
     x->lastMs = now;
@@ -83,11 +103,27 @@ static void sqnotes_step (t_sqnotes* x)
     const int numSamples = std::max (1, static_cast<int> (std::lround (elapsedMs * kVirtualRate / 1000.0)));
 
     opxy::TransportInfo transport;
-    transport.playing = itm_getstate (itm) != 0;
-    transport.bpm = itm_gettempo (itm) > 1.0 ? itm_gettempo (itm) : 120.0;
+    transport.playing = x->hostPlaying;
+    transport.bpm = x->hostTempo > 1.0 ? x->hostTempo : 120.0;
     transport.hasPpq = true;
-    const double ppqNow = itm_getticks (itm) / kTicksPerQuarter;
-    transport.ppqAtBlockStart = ppqNow - (elapsedMs / 1000.0) * transport.bpm / 60.0;
+
+    // Live reports a new position once per audio buffer; in between, move on at
+    // the tempo so the 32nd grid stays smooth.
+    double ppqNow = x->hostBeats;
+    if (x->hostPlaying)
+        ppqNow += std::min (now - x->hostBeatsMs, kMaxExtrapolationMs) / 60000.0 * transport.bpm;
+
+    // Continuous playback: start exactly where the last step ended, so no grid
+    // point is skipped or played twice. Otherwise (start, relocate, loop jump)
+    // just take the new position.
+    const bool continuous = x->hostPlaying && x->wasPlaying
+                         && ppqNow >= x->lastPpq && ppqNow - x->lastPpq < 0.5;
+    if (x->hostPlaying && x->wasPlaying && ppqNow < x->lastPpq && x->lastPpq - ppqNow < 0.05)
+        ppqNow = x->lastPpq;   // a fresh report slightly behind our estimate: don't step back
+    transport.ppqAtBlockStart = continuous ? x->lastPpq
+                                           : ppqNow - (elapsedMs / 1000.0) * transport.bpm / 60.0;
+    x->lastPpq = ppqNow;
+    x->wasPlaying = x->hostPlaying;
 
     // Whatever arrived since the last step happened "now", at the block's end.
     for (int i = 0; i < x->numIn; ++i)
@@ -205,6 +241,39 @@ static void sqnotes_pad (t_sqnotes* x, long index, long pressed)
     }
 }
 
+// The pad textbuttons bang their left outlet on press and again on release, and
+// send their text out the middle outlet on press only. A bang within a few ms of
+// a press is that press's own bang; any other bang is the release. This works
+// whichever of the two outlets fires first.
+static void sqnotes_padpress (t_sqnotes* x, long index)
+{
+    if (index < 0 || index >= opxy::kNumNoteFx)
+        return;
+    x->lastPressMs[index] = systimer_gettime();
+    sqnotes_pad (x, index, 1);
+}
+
+static void sqnotes_padbang (t_sqnotes* x, long index)
+{
+    if (index < 0 || index >= opxy::kNumNoteFx)
+        return;
+    if (systimer_gettime() - x->lastPressMs[index] >= kPressBangWindowMs)
+        sqnotes_pad (x, index, 0);
+}
+
+static void sqnotes_playing (t_sqnotes* x, long on) { x->hostPlaying = on != 0; }
+static void sqnotes_tempo (t_sqnotes* x, double bpm) { x->hostTempo = bpm; }
+static void sqnotes_beats (t_sqnotes* x, double beats)
+{
+    // Repeated reports within one audio buffer carry the same position; only a
+    // change restarts the extrapolation.
+    if (beats != x->hostBeats)
+    {
+        x->hostBeats = beats;
+        x->hostBeatsMs = systimer_gettime();
+    }
+}
+
 static void sqnotes_latch (t_sqnotes* x, long on)
 {
     x->latchMode = on != 0;
@@ -262,6 +331,15 @@ static void* sqnotes_new (t_symbol*, long, t_atom*)
     x->latchMode = false;
     for (auto& l : x->latched)
         l = false;
+    for (auto& t : x->lastPressMs)
+        t = -1.0e9;
+
+    x->hostPlaying = false;
+    x->hostTempo = 120.0;
+    x->hostBeats = 0.0;
+    x->hostBeatsMs = systimer_gettime();
+    x->wasPlaying = false;
+    x->lastPpq = 0.0;
 
     x->lastMs = systimer_gettime();
     x->clock = clock_new (x, reinterpret_cast<method> (sqnotes_tick));
@@ -291,6 +369,11 @@ extern "C" void ext_main (void*)
     class_addmethod (c, reinterpret_cast<method> (sqnotes_int),    "int",    A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_pad),    "pad",    A_LONG, A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_latch),  "latch",  A_LONG, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_padpress), "padpress", A_LONG, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_padbang),  "padbang",  A_LONG, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_playing),  "playing",  A_LONG, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_tempo),    "tempo",    A_FLOAT, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_beats),    "beats",    A_FLOAT, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_kick),   "kick",   A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_snare),  "snare",  A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_hat),    "hat",    A_LONG, 0);

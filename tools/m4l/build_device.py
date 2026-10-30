@@ -95,11 +95,22 @@ def parameter(longname, shortname, kind, initial, **extra):
 # Core chain
 midiin = newobj("midiin", [20, 20, 45, 20], 1, 1, ["int"])
 engine = newobj("seqqueen.notes", [20, 60, 95, 20], 1, 1)
-router = newobj("route punch active", [20, 100, 110, 20], 2, 3)
+router = newobj("route punch active sync", [20, 100, 140, 20], 2, 4)
 midiout = newobj("midiout", [20, 300, 50, 20], 1, 0)
 connect(midiin, 0, engine, 0)
 connect(engine, 0, router, 0)
-connect(router, 2, midiout, 0)        # everything that isn't punch/active: MIDI bytes
+connect(router, 3, midiout, 0)        # everything that isn't punch/active/sync: MIDI bytes
+
+# Live's transport. Every engine tick sends "sync"; [plugsync~] answers with play
+# state (outlet 0), tempo (5) and song position in beats (6), straight back in.
+sync_bang = newobj("t b", [240, 140, 30, 20], 1, 1, ["bang"])
+plugsync = newobj("plugsync~", [240, 170, 120, 20], 1, 9)
+connect(router, 2, sync_bang, 0)
+connect(sync_bang, 0, plugsync, 0)
+for outlet, message, x_offset in ((0, "playing", 0), (5, "tempo", 80), (6, "beats", 160)):
+    forward = newobj("prepend " + message, [240 + x_offset, 200, 75, 20], 2, 1)
+    connect(plugsync, outlet, forward, 0)
+    connect(forward, 0, engine, 0)
 
 # Seq Queen FX link: punch <fx> <strength> -> live.remote~ per effect.
 # live.thisdevice is a plain object (maxclass newobj), not a UI box; written as a
@@ -114,11 +125,13 @@ for f in range(10):
     connect(punch_route, f, remote, 0)
     connect(link, f, remote, 1)
 
-# Pads. A textbutton in button mode bangs on press and again on release, and
-# [mousestate] says which (1 = mouse down), so the engine gets "pad i 1" / "pad i
-# 0" and decides itself whether pads are momentary or latched. The engine's
-# "active i 0|1" recolours the pad: lit in its group colour while that punch is
-# on from any source (pad, latch, or trigger note in the clip).
+# Pads. A textbutton in button mode bangs its left outlet on press and again on
+# release, and sends its text out the middle outlet on press only. The engine gets
+# "padpress i" (middle) and "padbang i" (left) and works out press vs release
+# itself, whichever order they arrive in, then decides momentary vs latched.
+# ([mousestate] was tried first: at the release bang it could still read the
+# button as down, so pads never let go.) The engine's "active i 0|1" recolours
+# the pad: lit in its group colour while that punch is on from any source.
 COLOUR_KEYS = ("bgcolor", "bgoncolor", "textcolor", "textoncolor", "bordercolor", "borderoncolor")
 
 
@@ -146,13 +159,16 @@ for i, (name, colour) in enumerate(PADS):
               saved_attribute_attributes=fixed_colours())
     comment(live_note_name(i), [px, py + 160, 40, 18],
             [x, y + PAD_H + 1, PAD_W, 14], size=8.0, colour=[0.55, 0.57, 0.6, 1.0])
-    to_bang = newobj("t b", [px, py + 26, 30, 20], 1, 1, ["bang"])
-    mouse = newobj("mousestate", [px, py + 50, 70, 20], 1, 10)
-    to_engine = newobj("prepend pad %d" % i, [px, py + 74, 70, 20], 2, 1)
-    connect(pad, 0, to_bang, 0)
-    connect(to_bang, 0, mouse, 0)
-    connect(mouse, 0, to_engine, 0)
-    connect(to_engine, 0, engine, 0)
+    pressed = newobj("t b", [px + 40, py + 26, 30, 20], 1, 1, ["bang"])
+    press_msg = box("message", [px + 40, py + 50, 80, 20], text="padpress %d" % i,
+                    numinlets=2, numoutlets=1, outlettype=[""])
+    bang_msg = box("message", [px, py + 74, 80, 20], text="padbang %d" % i,
+                   numinlets=2, numoutlets=1, outlettype=[""])
+    connect(pad, 1, pressed, 0)          # middle outlet: text, on press only
+    connect(pressed, 0, press_msg, 0)
+    connect(pad, 0, bang_msg, 0)         # left outlet: bang on press and release
+    connect(press_msg, 0, engine, 0)
+    connect(bang_msg, 0, engine, 0)
 
     which = newobj("sel 0 1", [px, py - 60, 50, 20], 1, 3)
     lit = box("message", [px + 40, py - 36, 200, 20], text="bgcolor %s, textcolor %s" % (rgba(colour), rgba(PAD_TEXT_ON)),
