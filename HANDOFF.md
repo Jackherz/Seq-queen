@@ -27,8 +27,9 @@ sequencing to the host (decision 4):
   was loaded in the real standalone Max 9 with a scripted patch: notes passed
   through, a C0-range note became a `punch` message. 50 core tests green.
 * **The user tested the two-track VST3 setup in Live: "it works great".** The
-  one-track Max for Live device and the ten-FX / sixteen-punch versions have
-  **not** been tried in Live yet (section 4).
+  first Max for Live device crashed Live on load (malformed file, fixed the same
+  day); the fixed one loads in Live without crashing. Using it — punches, FX
+  link, timing — hasn't been reported on yet (section 4).
 * Fixed on the way: Stutter looped stale history on the first punch (idle effects
   never recorded); effects now `listen()` while idle.
 * **History.** This started as one all-in-one instrument (8-track p-lock sequencer
@@ -85,6 +86,16 @@ Built and installed with everything else (target `seqqueen_m4l`, script
 * `~/Documents/Max 9/Packages/Seq Queen/externals/seqqueen.notes.mxo` — universal
   (arm64 + x86_64) so it loads whether Live runs natively or under Rosetta
 * `~/Documents/Max 9/Packages/Seq Queen/javascript/seqqueen-link.js`
+
+**Before trying a changed device in Live, run `tools/m4l/check_in_max.sh <device.amxd>`.**
+It hosts the device in the standalone Max app's `[amxd~]` (same loader as Live)
+and fails if Max doesn't survive. A malformed device file crashes Live outright:
+the first generated device left out `project.searchpath` (and other keys Live's
+template has), and Max dereferenced it while loading. `build_device.py` now writes
+every key the template has; keep it that way. After any Max crash, Max replays
+the crashed session on its next launch, so clear
+`~/Library/Application Support/Cycling '74/Max 9/Crash Recovery/maxworkspace-*.txt`
+(the check script does) or every later run crashes too.
 
 The Max SDK (`max-sdk-base`, MIT) is fetched by CMake. `ctest` in
 `build/mac-release` runs the smoke test.
