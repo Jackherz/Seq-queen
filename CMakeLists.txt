@@ -178,6 +178,10 @@ if (OPXY_BUILD_PLUGIN)
         Source/Devices/FxPlugin/FxEntry.cpp
         Source/Devices/Shared/SeqQueenLookAndFeel.cpp)
     opxy_finish_device(SeqQueenFX)
+    # JUCE otherwise adds 16 x 128 hidden MIDI-CC parameters to any VST3 that takes
+    # MIDI. With those, Live won't list the plug-in's real parameters, and the Max
+    # for Live device can't reach the Punch controls it needs.
+    target_compile_definitions(SeqQueenFX PUBLIC JUCE_VST3_EMULATE_MIDI_CC_WITH_PARAMETERS=0)
 
     # Live won't load third-party MIDI effects, so this is an instrument that
     # outputs MIDI (and silence). Other tracks pick it as their "MIDI From".

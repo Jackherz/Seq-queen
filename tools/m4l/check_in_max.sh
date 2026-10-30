@@ -52,9 +52,21 @@ i=0
 while [ $i -lt 90 ] && pgrep -x Max >/dev/null; do sleep 1; i=$((i + 1)); done
 sleep 1
 
-if [ -s "$RESULT" ]; then
-    echo "ok: Max loaded $(basename "$DEVICE") and kept running"
-else
+if [ ! -s "$RESULT" ]; then
     echo "FAILED: Max did not get past loading $(basename "$DEVICE") (see ~/Library/Logs/DiagnosticReports/Max-*.ips)" >&2
     exit 1
 fi
+
+# Surviving isn't enough: an object that fails to load is silently dropped along
+# with its patch cords (that's how a broken live.thisdevice slipped through).
+# Max logs those; the Live API itself only exists in Live, so its errors here
+# are expected and ignored.
+LOG="$HOME/Library/Application Support/Cycling '74/Max 9/Logs/Max.log"
+PROBLEMS="$(grep -E "error\]" "$LOG" | grep -i -E "patchcord|no such object|couldn't|could not|not found" \
+            | grep -v -i "liveapi\|live api" || true)"
+if [ -n "$PROBLEMS" ]; then
+    echo "FAILED: Max loaded $(basename "$DEVICE") but reported problems:" >&2
+    echo "$PROBLEMS" | sed 's/^.*error\] \[[0-9]*\] /  /' | sort | uniq -c >&2
+    exit 1
+fi
+echo "ok: Max loaded $(basename "$DEVICE") with every object intact"

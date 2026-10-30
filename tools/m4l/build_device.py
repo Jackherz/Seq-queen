@@ -32,6 +32,9 @@ GREEN = [0.42, 0.82, 0.55, 1.0]
 CYAN = [0.30, 0.79, 0.85, 1.0]
 VIOLET = [0.60, 0.55, 0.91, 1.0]
 AMBER = [0.94, 0.48, 0.24, 1.0]
+PAD_OFF = [0.17, 0.17, 0.21, 1.0]
+PAD_TEXT = [0.86, 0.86, 0.86, 1.0]
+PAD_TEXT_ON = [0.06, 0.06, 0.06, 1.0]
 
 # The sixteen punches, in NoteFxType order (trigger note = index, from C-2).
 PADS = [
@@ -98,9 +101,10 @@ connect(midiin, 0, engine, 0)
 connect(engine, 0, router, 0)
 connect(router, 2, midiout, 0)        # everything that isn't punch/active: MIDI bytes
 
-# Seq Queen FX link: punch <fx> <strength> -> live.remote~ per effect
-this_device = box("live.thisdevice", [400, 20, 85, 20], numinlets=1, numoutlets=3,
-                  outlettype=["bang", "int", "int"])
+# Seq Queen FX link: punch <fx> <strength> -> live.remote~ per effect.
+# live.thisdevice is a plain object (maxclass newobj), not a UI box; written as a
+# UI box it silently failed to load, so the link script never started.
+this_device = newobj("live.thisdevice", [400, 20, 85, 20], 1, 3, ["bang", "int", "int"])
 link = newobj("js seqqueen-link.js", [400, 60, 120, 20], 1, 11)
 connect(this_device, 0, link, 0)
 punch_route = newobj("route 0 1 2 3 4 5 6 7 8 9", [140, 140, 160, 20], 2, 11)
@@ -110,26 +114,56 @@ for f in range(10):
     connect(punch_route, f, remote, 0)
     connect(link, f, remote, 1)
 
-# Pads: toggles that latch a punch; lit by the engine while the punch is active
-# from any source (note or pad).
+# Pads. A textbutton in button mode bangs on press and again on release, and
+# [mousestate] says which (1 = mouse down), so the engine gets "pad i 1" / "pad i
+# 0" and decides itself whether pads are momentary or latched. The engine's
+# "active i 0|1" recolours the pad: lit in its group colour while that punch is
+# on from any source (pad, latch, or trigger note in the clip).
+COLOUR_KEYS = ("bgcolor", "bgoncolor", "textcolor", "textoncolor", "bordercolor", "borderoncolor")
+
+
+def fixed_colours():
+    """Mark colours as our own, so the Live theme doesn't replace them."""
+    return {key: {"expression": ""} for key in COLOUR_KEYS}
+
+
+def rgba(colour):
+    return " ".join("%.3f" % c for c in colour)
+
+
 active_route = newobj("route " + " ".join(str(i) for i in range(16)), [700, 100, 300, 20], 2, 17)
 connect(router, 1, active_route, 0)
 for i, (name, colour) in enumerate(PADS):
     row, col = divmod(i, 8)
     x = PADS_X + col * (PAD_W + GAP)
     y = ROW_Y[row]
-    pad = box("live.text", [700 + col * 70, 160 + row * 120, 60, 20], [x, y, PAD_W, PAD_H],
-              text=name, texton=name, mode=1, parameter_enable=0, fontsize=9.0,
-              numinlets=1, numoutlets=2, outlettype=["", ""],
-              activebgoncolor=colour, bgoncolor=colour)
-    comment(live_note_name(i), [700 + col * 70, 185 + row * 120, 40, 18],
+    px, py = 700 + col * 90, 160 + row * 200
+    pad = box("textbutton", [px, py, 60, 20], [x, y, PAD_W, PAD_H],
+              text=name, texton=name, mode=0, fontsize=9.5, fontname="Ableton Sans Bold",
+              numinlets=1, numoutlets=3, outlettype=["", "", "int"], rounded=3.0,
+              bgcolor=PAD_OFF, bgoncolor=colour, textcolor=PAD_TEXT, textoncolor=PAD_TEXT_ON,
+              bordercolor=colour, borderoncolor=colour,
+              saved_attribute_attributes=fixed_colours())
+    comment(live_note_name(i), [px, py + 160, 40, 18],
             [x, y + PAD_H + 1, PAD_W, 14], size=8.0, colour=[0.55, 0.57, 0.6, 1.0])
-    to_engine = newobj("prepend pad %d" % i, [700 + col * 70, 210 + row * 120, 70, 20], 2, 1)
-    connect(pad, 0, to_engine, 0)
+    to_bang = newobj("t b", [px, py + 26, 30, 20], 1, 1, ["bang"])
+    mouse = newobj("mousestate", [px, py + 50, 70, 20], 1, 10)
+    to_engine = newobj("prepend pad %d" % i, [px, py + 74, 70, 20], 2, 1)
+    connect(pad, 0, to_bang, 0)
+    connect(to_bang, 0, mouse, 0)
+    connect(mouse, 0, to_engine, 0)
     connect(to_engine, 0, engine, 0)
-    light = newobj("prepend set", [700 + col * 70, 130 + row * 120, 70, 20], 2, 1)
-    connect(active_route, i, light, 0)
-    connect(light, 0, pad, 0)
+
+    which = newobj("sel 0 1", [px, py - 60, 50, 20], 1, 3)
+    lit = box("message", [px + 40, py - 36, 200, 20], text="bgcolor %s, textcolor %s" % (rgba(colour), rgba(PAD_TEXT_ON)),
+              numinlets=2, numoutlets=1, outlettype=[""])
+    unlit = box("message", [px, py - 36, 200, 20], text="bgcolor %s, textcolor %s" % (rgba(PAD_OFF), rgba(PAD_TEXT)),
+                numinlets=2, numoutlets=1, outlettype=[""])
+    connect(active_route, i, which, 0)
+    connect(which, 0, unlit, 0)
+    connect(which, 1, lit, 0)
+    connect(unlit, 0, pad, 0)
+    connect(lit, 0, pad, 0)
 
 # Settings (saved with the Live set)
 settings_y = 24
@@ -155,6 +189,16 @@ rate_send = newobj("prepend rate", [1200, 400, 80, 20], 2, 1)
 connect(rate, 0, rate_send, 0)
 connect(rate_send, 0, engine, 0)
 connect(this_device, 0, rate, 0)
+settings_y += 20
+
+comment("Pads", [1100, 430, 40, 18], [SETTINGS_X, settings_y, 40, 16])
+latch = box("live.text", [1150, 430, 50, 15], [SETTINGS_X + 40, settings_y, 50, 15],
+            text="Hold", texton="Latch", mode=1, numinlets=1, numoutlets=2, outlettype=["", ""],
+            **parameter("Pad Mode", "Pads", 2, 0, parameter_enum=["Hold", "Latch"], parameter_mmax=1.0))
+latch_send = newobj("prepend latch", [1200, 430, 80, 20], 2, 1)
+connect(latch, 0, latch_send, 0)
+connect(latch_send, 0, engine, 0)
+connect(this_device, 0, latch, 0)
 
 swing = box("live.dial", [1300, 300, 44, 48], [SETTINGS_X + 104, 22, 50, 48],
             numinlets=1, numoutlets=2, outlettype=["", "float"],
@@ -168,7 +212,7 @@ connect(this_device, 0, swing, 0)
 
 # Words
 comment("SEQ QUEEN NOTES", [400, 400, 120, 18], [PADS_X, 4, 140, 18], size=11.0, colour=AMBER)
-comment("Hold C-2 to D#-1 in your clip, or click a pad. Green pads need Live playing.",
+comment("Click a pad, or hold C-2 to D#-1 in your clip. C0-A0 punch Seq Queen FX. Green pads need Live playing.",
         [400, 430, 400, 18], [PADS_X, 104, 8 * (PAD_W + GAP), 16], size=8.5)
 status = comment("FX: looking for Seq Queen FX...", [400, 460, 400, 18],
                  [PADS_X, 120, 8 * (PAD_W + GAP) + 160, 16], size=8.5, colour=[0.55, 0.57, 0.6, 1.0])

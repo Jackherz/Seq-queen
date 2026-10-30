@@ -41,6 +41,7 @@ void* gClockOwner = nullptr;
 method gClockFn = nullptr;
 
 double gTimeMs = 0.0, gTicks = 0.0, gTempo = 120.0;
+double gSystemMs = 1000.0;   // the CPU clock: always moves
 long gRunning = 0;
 
 int gFailures = 0;
@@ -105,6 +106,7 @@ void clock_fdelay (void*, double) {}
 void clock_unset (void*) {}
 void* itm_getglobal() { static int itm; return &itm; }
 double itm_gettime (t_itm*) { return gTimeMs; }
+double systimer_gettime() { return gSystemMs; }
 double itm_getticks (t_itm*) { return gTicks; }
 double itm_gettempo (t_itm*) { return gTempo; }
 long itm_getstate (t_itm*) { return gRunning; }
@@ -126,9 +128,12 @@ void advanceMs (double ms)
     // 1 ms clock ticks, with the fake transport moving at gTempo while running.
     for (double t = 0.0; t < ms; t += 1.0)
     {
-        gTimeMs += 1.0;
-        if (gRunning)
+        gSystemMs += 1.0;
+        if (gRunning)   // like Live: the transport's own clock stops with it
+        {
+            gTimeMs += 1.0;
             gTicks += 480.0 * gTempo / 60000.0;
+        }
         reinterpret_cast<void (*) (void*)> (gClockFn) (gClockOwner);
     }
 }
@@ -213,6 +218,60 @@ int main (int argc, char* argv[])
         ((gMidi[i] & 0xF0) == 0x90 && gMidi[i + 2] > 0 ? ons : offs) += 1;
     expect (ons == offs, "every generated hat got its note-off");
     expect (gMessages["active"].back()[1] == 0, "pad light turns off");
+
+    // Regression: with the transport stopped, a shortened note must still end on
+    // time. Timing off the transport clock (which stops) left it hanging.
+    gRunning = 0;
+    gMidi.clear();
+    const auto pad = reinterpret_cast<void (*) (void*, long, long)> (gClass.methods["pad"]);
+    pad (gObject, 8, 1);                       // Shorten, held
+    advanceMs (5.0);
+    sendBytes ({ 0x90, 50, 100 });
+    advanceMs (150.0);                         // a 32nd at 120 bpm is 62.5 ms
+    pad (gObject, 8, 0);
+    expect (gMidi.size() == 6 && gMidi[3] == 0x80 && gMidi[4] == 50,
+            "shortened note ends on time with the transport stopped");
+    sendBytes ({ 0x80, 50, 0 });
+
+    if (gClass.methods.count ("latch") == 0)
+    {
+        std::printf ("  FAIL no latch method\n\n%d failures\n", ++gFailures);
+        return 1;
+    }
+
+    // Momentary pads: Mute only while pressed.
+    const auto latch = reinterpret_cast<void (*) (void*, long)> (gClass.methods["latch"]);
+    gMidi.clear();
+    pad (gObject, 0, 1);
+    advanceMs (2.0);
+    sendBytes ({ 0x90, 51, 100, 0x80, 51, 0 });
+    pad (gObject, 0, 0);
+    advanceMs (2.0);
+    sendBytes ({ 0x90, 52, 100, 0x80, 52, 0 });
+    expect (gMidi.size() == 6 && gMidi[1] == 52, "momentary mute: muted while pressed, back on release");
+
+    // Latched pads: press once to latch, again to let go.
+    latch (gObject, 1);
+    gMidi.clear();
+    pad (gObject, 0, 1);
+    pad (gObject, 0, 0);
+    advanceMs (2.0);
+    sendBytes ({ 0x90, 53, 100, 0x80, 53, 0 });
+    const bool mutedWhileLatched = gMidi.empty();
+    pad (gObject, 0, 1);
+    pad (gObject, 0, 0);
+    advanceMs (2.0);
+    sendBytes ({ 0x90, 54, 100, 0x80, 54, 0 });
+    expect (mutedWhileLatched && gMidi.size() == 6 && gMidi[1] == 54, "latched mute: on with one press, off with the next");
+    expect (gMessages["active"].back()[0] == 0 && gMessages["active"].back()[1] == 0, "latched pad light goes off again");
+
+    // Switching modes lets go of a latched pad.
+    pad (gObject, 0, 1);
+    latch (gObject, 0);
+    advanceMs (2.0);
+    gMidi.clear();
+    sendBytes ({ 0x90, 55, 100, 0x80, 55, 0 });
+    expect (gMidi.size() == 6, "changing pad mode releases latched pads");
 
     reinterpret_cast<void (*) (void*)> (gClass.freeMethod) (gObject);
     std::printf ("\n%d failures\n", gFailures);

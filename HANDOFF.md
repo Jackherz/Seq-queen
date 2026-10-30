@@ -89,7 +89,9 @@ Built and installed with everything else (target `seqqueen_m4l`, script
 
 **Before trying a changed device in Live, run `tools/m4l/check_in_max.sh <device.amxd>`.**
 It hosts the device in the standalone Max app's `[amxd~]` (same loader as Live)
-and fails if Max doesn't survive. A malformed device file crashes Live outright:
+and fails if Max doesn't survive, or if Max's log says any object failed to load
+(dropped objects take their patch cords with them silently; that's how
+`live.thisdevice`, written as a UI box, stopped the FX link from ever starting). A malformed device file crashes Live outright:
 the first generated device left out `project.searchpath` (and other keys Live's
 template has), and Max dereferenced it while loading. `build_device.py` now writes
 every key the template has; keep it that way. After any Max crash, Max replays
@@ -205,6 +207,19 @@ docs/ADDING_AN_FX.md             recipe for adding a seventh punch-in effect
    low-priority thread, which would make drums sloppy. `seqqueen.notes` runs the
    tested `NoteFx` on the scheduler; JS (`seqqueen-link.js`) only finds the FX
    device when the track's devices change.
+12. **The external times itself with `systimer_gettime()`, never the ITM's clock.**
+   The ITM clock stops with Live's transport; timing off it stalled every scheduled
+   note-off while stopped (the user's stuck notes). ITM is only for ticks, tempo
+   and play state. `seqqueen_max_smoke` freezes its fake ITM clock when stopped to
+   guard this.
+13. **Pads are textbuttons + `[mousestate]`**, sending press/release to the
+   external, which owns momentary vs latched (`latch` message, "Pads" switch). The
+   engine's `active` messages recolour them. Colours are marked as fixed
+   (`saved_attribute_attributes` with an empty expression) so Live's theme doesn't
+   override them.
+14. **Seq Queen FX is built with `JUCE_VST3_EMULATE_MIDI_CC_WITH_PARAMETERS=0`.**
+   Otherwise JUCE adds 2048 hidden MIDI-CC parameters and Live stops listing the
+   real ones, which the Max device needs to reach the Punch controls.
 10. **`seqqueen.notes` has one outlet** (MIDI ints, `punch …`, `active …`) split by
    `[route punch active]`, so the patch never depends on Max's outlet ordering.
 11. **Effects get the host transport** (`PunchInFx::setTransport`) and **listen

@@ -5,7 +5,8 @@
 //  Same engine as the VST3 (opxy::NoteFx); this file only adapts Max to it:
 //
 //    inlet      raw MIDI bytes from [midiin]
-//               pad <i> <0|1>     on-screen pad latched / released
+//               pad <i> <0|1>     on-screen pad pressed / released
+//               latch <0|1>       pads latch (press on, press off) or are momentary
 //               kick|snare|hat <note>, rate <0-2>, swing <0-0.6>
 //    outlet     one outlet, so the patch never depends on outlet order:
 //               <int>                 raw MIDI bytes for [midiout]
@@ -17,9 +18,11 @@
 //
 //  Timing: NoteFx counts in samples, Max in milliseconds. A 1 ms clock (one
 //  audio vector when Live runs the scheduler in audio interrupt) advances a
-//  virtual 48 kHz sample clock by the real time elapsed, and the host grid comes
-//  from Max's global transport (ITM), which follows Live. Incoming notes are
-//  processed the moment they arrive, so pass-through adds no delay.
+//  virtual 48 kHz sample clock by the real time elapsed (systimer, the CPU
+//  clock). The host grid, tempo and play state come from Max's global transport
+//  (ITM), which follows Live. Don't time anything off the ITM's own clock: it
+//  stops with Live's transport, and scheduled note-offs then stall (stuck
+//  notes). Incoming notes are processed on arrival, so pass-through adds no delay.
 // -----------------------------------------------------------------------------
 
 #include "ext.h"
@@ -60,6 +63,10 @@ struct t_sqnotes
 
     double lastMs;
     bool shownActive[opxy::kNumNoteFx];
+
+    // Pads: momentary (held while pressed) or latched (press on, press off).
+    bool latchMode;
+    bool latched[opxy::kNumNoteFx];
 };
 
 static t_class* sqnotes_class = nullptr;
@@ -67,7 +74,7 @@ static t_class* sqnotes_class = nullptr;
 static void sqnotes_step (t_sqnotes* x)
 {
     t_itm* itm = static_cast<t_itm*> (itm_getglobal());
-    const double now = itm_gettime (itm);
+    const double now = systimer_gettime();
     const double elapsedMs = std::max (0.0, now - x->lastMs);
     x->lastMs = now;
 
@@ -178,9 +185,36 @@ static void sqnotes_int (t_sqnotes* x, long byte)
     }
 }
 
-static void sqnotes_pad (t_sqnotes* x, long index, long held)
+static void sqnotes_pad (t_sqnotes* x, long index, long pressed)
 {
-    x->fx->setPadHeld (static_cast<int> (index), held != 0);
+    if (index < 0 || index >= opxy::kNumNoteFx)
+        return;
+    const int i = static_cast<int> (index);
+
+    if (x->latchMode)
+    {
+        if (pressed != 0)   // each press flips it; releases don't matter
+        {
+            x->latched[i] = ! x->latched[i];
+            x->fx->setPadHeld (i, x->latched[i]);
+        }
+    }
+    else
+    {
+        x->fx->setPadHeld (i, pressed != 0);
+    }
+}
+
+static void sqnotes_latch (t_sqnotes* x, long on)
+{
+    x->latchMode = on != 0;
+
+    // Switching mode lets go of everything, so nothing stays on invisibly.
+    for (int i = 0; i < opxy::kNumNoteFx; ++i)
+    {
+        x->latched[i] = false;
+        x->fx->setPadHeld (i, false);
+    }
 }
 
 static void sqnotes_kick (t_sqnotes* x, long note)  { x->fx->getSettings().kickNote.store (static_cast<int> (note)); }
@@ -196,7 +230,7 @@ static void sqnotes_assist (t_sqnotes*, void*, long io, long index, char* text)
 {
     (void) index;
     if (io == ASSIST_INLET)
-        snprintf_zero (text, 256, "MIDI bytes from midiin; pad, kick, snare, hat, rate, swing");
+        snprintf_zero (text, 256, "MIDI bytes from midiin; pad, latch, kick, snare, hat, rate, swing");
     else
         snprintf_zero (text, 256, "MIDI bytes; punch <fx> <strength>; active <pad> <0/1>");
 }
@@ -225,8 +259,11 @@ static void* sqnotes_new (t_symbol*, long, t_atom*)
     x->have = 0;
     for (auto& shown : x->shownActive)
         shown = false;
+    x->latchMode = false;
+    for (auto& l : x->latched)
+        l = false;
 
-    x->lastMs = itm_gettime (static_cast<t_itm*> (itm_getglobal()));
+    x->lastMs = systimer_gettime();
     x->clock = clock_new (x, reinterpret_cast<method> (sqnotes_tick));
     clock_fdelay (x->clock, 1.0);
     return x;
@@ -253,6 +290,7 @@ extern "C" void ext_main (void*)
 
     class_addmethod (c, reinterpret_cast<method> (sqnotes_int),    "int",    A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_pad),    "pad",    A_LONG, A_LONG, 0);
+    class_addmethod (c, reinterpret_cast<method> (sqnotes_latch),  "latch",  A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_kick),   "kick",   A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_snare),  "snare",  A_LONG, 0);
     class_addmethod (c, reinterpret_cast<method> (sqnotes_hat),    "hat",    A_LONG, 0);

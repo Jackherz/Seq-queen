@@ -96,6 +96,10 @@ drives it all:
 | F#-2 | Octave up | | D#-1 | Groove: swing, accents, loose timing |
 | G-2 | Octave down | | | |
 
+Pads light up while their punch is on, from a click or a note in the clip. The
+**Pads** switch picks **Hold** (on while you hold the mouse down) or **Latch**
+(click on, click off).
+
 Repeat, the fills, kick+snare, hats and arp follow Live's 16th grid, so they only
 play while Live is playing. Kick/snare/hat notes default to the Drum Rack pads C1,
 D1 and F#1; the Notes device has settings for them, the repeat/arp rate and swing.
